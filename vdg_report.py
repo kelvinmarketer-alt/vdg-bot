@@ -114,11 +114,22 @@ records = [dict(zip(header_raw, row)) for row in data_rows]
 df = pd.DataFrame(records)
 if "ad_group" not in df.columns:
     df["ad_group"] = "(campaign-level)"
-df = df[["campaign", "ad_group", "cost"]].copy()
+# Lấy đủ cột cho phân tích
+keep_cols = ["campaign", "ad_group", "cost"]
+for c in ["impressions", "clicks"]:
+    if c in df.columns:
+        keep_cols.append(c)
+df = df[keep_cols].copy()
 # Sheet VN: "," có thể là dấu thập phân → đổi sang "." rồi parse
-df["cost"] = df["cost"].astype(str).str.replace(",", ".", regex=False)
-df["cost"] = pd.to_numeric(df["cost"], errors="coerce").fillna(0)
+for c in ["cost", "impressions", "clicks"]:
+    if c in df.columns:
+        df[c] = df[c].astype(str).str.replace(",", ".", regex=False)
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
 df = df[df["cost"] > 0].reset_index(drop=True)
+# Tính CTR mỗi dòng (%)
+if "impressions" in df.columns and "clicks" in df.columns:
+    df["ctr"] = (df["clicks"] / df["impressions"].replace(0, 1) * 100).round(2)
+    df["cpc"] = (df["cost"] / df["clicks"].replace(0, 1)).round(0).astype(int)
 print(f"  Updated lúc: {records[0].get('updated_at', 'N/A')} | {len(df)} dòng có chi tiêu")
 
 print(f"\nDanh sách (campaign / ad group / chi tiêu):")
@@ -255,4 +266,108 @@ def ghi_mien(mien_label, tab_name):
 
 ghi_mien("Bắc", TAB_BAC)
 ghi_mien("Nam", TAB_NAM)
-print(f"\n✓ Done: https://docs.google.com/spreadsheets/d/{SHEET_ID}")
+print(f"\n✓ Sheet đã update: https://docs.google.com/spreadsheets/d/{SHEET_ID}")
+
+
+# === STEP 5: PHÂN TÍCH + GỬI TELEGRAM ===
+def send_telegram_report():
+    import urllib.request
+    import urllib.parse
+
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        print("\n⚠️ Thiếu TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID, bỏ qua send")
+        return
+
+    print("\n→ Đang phân tích + tạo báo cáo Telegram...")
+
+    # Tổng hợp toàn cảnh để gửi cho Claude
+    total_spend = int(df["cost"].sum())
+    by_mien = df.groupby("mien")["cost"].sum().to_dict()
+    bac_pct = round(by_mien.get("Bắc", 0) / total_spend * 100, 1) if total_spend else 0
+    nam_pct = round(by_mien.get("Nam", 0) / total_spend * 100, 1) if total_spend else 0
+
+    # Detail có CTR/CPC nếu có
+    has_perf = "ctr" in df.columns
+    if has_perf:
+        detail_str = df[["campaign", "ad_group", "mien", "nhom_sp",
+                         "cost", "impressions", "clicks", "ctr", "cpc"]].to_string(index=False)
+    else:
+        detail_str = df[["campaign", "ad_group", "mien", "nhom_sp", "cost"]].to_string(index=False)
+
+    summary_str = summary.to_string(index=False)
+
+    prompt = f"""Bạn là analyst Google Ads cho công ty Vua Đóng Gói (B2B bao bì).
+
+DATA TUẦN: {ngay_bd_str} → {ngay_kt_str} (Tháng {thang}, Tuần {tuan_trong_thang})
+Tổng chi: {total_spend:,}đ — Bắc {bac_pct}% / Nam {nam_pct}%
+
+Tổng hợp theo (miền, nhóm SP):
+{summary_str}
+
+Chi tiết từng dòng:
+{detail_str}
+
+VIẾT 1 TIN NHẮN TELEGRAM ngắn gọn (<400 chữ tiếng Việt):
+
+📊 *Báo cáo Tuần {tuan_trong_thang}/Tháng {thang}* ({ngay_bd_str.replace('/2026', '')} - {ngay_kt_str.replace('/2026', '')})
+
+💰 *Tổng chi*: ...đ
+🌏 *Phân bổ*: Bắc XX% / Nam XX%
+
+🏆 *Top 3 nhóm SP chi nhiều nhất:*
+1. ...
+2. ...
+3. ...
+
+🚨 *Cảnh báo* (nếu có):
+- Nhóm/campaign nào CTR thấp bất thường (<5%)
+- Nhóm chi nhiều nhưng ít click
+- Khác biệt Bắc/Nam đáng chú ý
+
+💡 *Đề xuất hành động* (1-2 ý):
+- ...
+
+Quy tắc:
+- Markdown Telegram: *bold*, _italic_, KHÔNG dùng ## hay ** (chỉ 1 dấu *)
+- Số tiền dùng dấu chấm: 7.316.100đ
+- Concise, không lan man
+- Nếu không có anomaly thì viết: "🚨 Không có cảnh báo."
+"""
+
+    client = Anthropic()
+    resp = client.messages.create(
+        model="claude-opus-4-7",
+        max_tokens=1500,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    msg = resp.content[0].text.strip()
+
+    # Send Telegram
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    data = urllib.parse.urlencode({
+        "chat_id": chat_id,
+        "text": msg,
+        "parse_mode": "Markdown",
+        "disable_web_page_preview": "true",
+    }).encode("utf-8")
+    try:
+        req = urllib.request.Request(url, data=data)
+        with urllib.request.urlopen(req, timeout=15) as r:
+            print(f"✓ Telegram đã gửi (HTTP {r.status})")
+    except Exception as e:
+        print(f"❌ Telegram lỗi: {e}")
+        # Fallback: gửi không có markdown nếu lỗi parse
+        try:
+            data_plain = urllib.parse.urlencode({
+                "chat_id": chat_id, "text": msg
+            }).encode("utf-8")
+            urllib.request.urlopen(urllib.request.Request(url, data=data_plain), timeout=15)
+            print(f"✓ Telegram đã gửi (plain text fallback)")
+        except Exception as e2:
+            print(f"❌ Fallback cũng lỗi: {e2}")
+
+
+send_telegram_report()
+print(f"\n✓ Done!")
