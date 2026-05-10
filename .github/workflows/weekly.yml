@@ -1,0 +1,41 @@
+name: VDG Weekly Report
+
+on:
+  # Tự chạy mỗi thứ 2 lúc 8:00 AM giờ Việt Nam (1:00 UTC)
+  schedule:
+    - cron: '0 1 * * 1'
+  # Cho phép trigger tay từ tab Actions trên GitHub
+  workflow_dispatch:
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Write Google Service Account credentials
+        env:
+          GSA_JSON: ${{ secrets.GSA_JSON }}
+        run: echo "$GSA_JSON" > gsa.json
+
+      - name: Run weekly report
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          PYTHONIOENCODING: utf-8
+        run: python vdg_report.py -y
+
+      - name: Cleanup credentials
+        if: always()
+        run: rm -f gsa.json

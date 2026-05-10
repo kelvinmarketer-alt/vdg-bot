@@ -1,0 +1,17 @@
+# Service account credentials — KHÔNG bao giờ commit lên Git
+gsa.json
+*.json.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store
