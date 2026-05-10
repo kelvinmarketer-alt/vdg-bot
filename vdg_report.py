@@ -52,6 +52,71 @@ def col_letter(idx):
     return s
 
 
+def calc_thang_tuan(date_obj):
+    """Tính (tháng_block, tuần_trong_block) theo convention sheet VDG.
+
+    Rules:
+    - Jan partial week: 1/1 đến CN đầu tiên → T1W1 (vd 1/1/2026 Thu → 1-4/1 = T1W1)
+    - Tháng bắt đầu Mon-Wed: W1 = Mon-week chứa ngày 1 (Mon có thể ở tháng trước)
+    - Tháng bắt đầu Thu-Sun: W1 = Mon-week ĐẦU TIÊN trong tháng (bỏ leading partial)
+    """
+    if isinstance(date_obj, datetime):
+        date_obj = date_obj.date()
+
+    jan1 = date(date_obj.year, 1, 1)
+    if jan1.weekday() != 0:  # Jan 1 không phải Mon
+        first_sun = jan1 + timedelta(days=(6 - jan1.weekday()) % 7)
+        if jan1 <= date_obj <= first_sun:
+            return (1, 1)
+
+    mon = date_obj if date_obj.weekday() == 0 else date_obj - timedelta(days=date_obj.weekday())
+
+    def block_anchor(year, month):
+        first = date(year, month, 1)
+        fdw = first.weekday()
+        if month == 1 and fdw != 0:
+            return (first + timedelta(days=(7 - fdw) % 7), 2)
+        elif fdw <= 2:
+            return (first - timedelta(days=fdw), 1)
+        else:
+            return (first + timedelta(days=7 - fdw), 1)
+
+    target_year, target_month = mon.year, mon.month
+    fbm, w_offset = block_anchor(target_year, target_month)
+
+    # Mon là leading Mon của block tháng kế (ở tháng hiện tại)?
+    next_month = target_month + 1 if target_month < 12 else 1
+    next_year = target_year + 1 if target_month == 12 else target_year
+    next_first = date(next_year, next_month, 1)
+    fbm_next, w_offset_next = block_anchor(next_year, next_month)
+    if fbm_next < next_first and mon == fbm_next:
+        target_year, target_month = next_year, next_month
+        fbm, w_offset = fbm_next, w_offset_next
+    elif mon < fbm:
+        prev_month = target_month - 1 if target_month > 1 else 12
+        prev_year = target_year - 1 if target_month == 1 else target_year
+        target_year, target_month = prev_year, prev_month
+        fbm, w_offset = block_anchor(prev_year, prev_month)
+
+    tuan = (mon - fbm).days // 7 + w_offset
+    return (target_month, tuan)
+
+
+def find_doanh_thu_cols(header):
+    """Tìm cột phần Doanh thu.
+    Lưu ý 'tổng' xuất hiện 3 lần: (1) Tổng data nhóm, (2) Tổng (doanh thu), (3) Tổng 2026.
+    Dùng nth=2 để khớp đúng cột Tổng doanh thu."""
+    return {
+        "thang": find_col_nth(header, "tháng", 4),
+        "tuan": find_col_nth(header, "tuần", 3),
+        "nbd": find_col_nth(header, "ngày bắt đầu", 2),
+        "nkt": find_col_nth(header, "ngày kết thúc", 2),
+        "kc_old": find_col_nth(header, "doanh thu khách cũ", 1),
+        "kc_new": find_col_nth(header, "doanh thu khách mới", 1),
+        "total": find_col_nth(header, "tổng", 2),
+    }
+
+
 # === STEP 1: TỰ TÍNH TUẦN (hoặc nhận CLI override) ===
 print("=" * 50)
 print("VDG WEEKLY REPORT BOT v3")
@@ -80,8 +145,7 @@ else:
 
 ngay_bd_str = ngay_bd.strftime("%d/%m/%Y")
 ngay_kt_str = ngay_kt.strftime("%d/%m/%Y")
-thang = ngay_bd.month
-tuan_trong_thang = (ngay_bd.day - 1) // 7 + 1
+thang, tuan_trong_thang = calc_thang_tuan(ngay_bd)
 print(f"  → Tháng {thang} / Tuần {tuan_trong_thang} ({ngay_bd_str} - {ngay_kt_str})")
 
 # Format ngắn cho cell ngày BĐ/KT (vd: "4/5", "10/5")
@@ -266,12 +330,82 @@ def ghi_mien(mien_label, tab_name):
         ws.batch_update(updates, value_input_option="USER_ENTERED")
 
 
+def ghi_doanh_thu_dates(tab_name):
+    """Ghi Ngày BĐ/KT vào phần Doanh thu (cột U, V của hàng khớp Tháng/Tuần)."""
+    ws = sh.worksheet(tab_name)
+    rows = ws.get_all_values()
+    header = rows[HEADER_ROW - 1]
+    idx = find_doanh_thu_cols(header)
+    if not all([idx["thang"], idx["tuan"], idx["nbd"], idx["nkt"]]):
+        print(f"  ⚠️ Không tìm thấy đủ cột Doanh thu (thang/tuan/nbd/nkt)")
+        return
+
+    # Forward-fill Tháng (cột S merged cells)
+    target_row = None
+    cur_thang = None
+    for ri, row in enumerate(rows[HEADER_ROW:], start=HEADER_ROW + 1):
+        if len(row) < max(idx["thang"], idx["tuan"]):
+            continue
+        v_thang = row[idx["thang"] - 1].strip()
+        v_tuan = row[idx["tuan"] - 1].strip()
+        if v_thang:
+            cur_thang = v_thang
+        if cur_thang == str(thang) and v_tuan == str(tuan_trong_thang):
+            target_row = ri
+            break
+
+    if not target_row:
+        print(f"  ⚠️ Doanh thu: không tìm thấy hàng T{thang}/W{tuan_trong_thang}")
+        return
+
+    ws.batch_update([
+        {"range": f"{col_letter(idx['nbd'])}{target_row}", "values": [[ngay_bd_short]]},
+        {"range": f"{col_letter(idx['nkt'])}{target_row}", "values": [[ngay_kt_short]]},
+    ], value_input_option="USER_ENTERED")
+    print(f"  ✓ Doanh thu hàng {target_row}: ngày {ngay_bd_short} → {ngay_kt_short}")
+
+
 ghi_mien("Bắc", TAB_BAC)
 ghi_mien("Nam", TAB_NAM)
+print("\n--- Ghi Ngày BĐ/KT vào phần Doanh thu ---")
+ghi_doanh_thu_dates(TAB_BAC)
+ghi_doanh_thu_dates(TAB_NAM)
 print(f"\n✓ Sheet đã update: https://docs.google.com/spreadsheets/d/{SHEET_ID}")
 
 
 # === STEP 5: STATE-AWARE TELEGRAM REPORTING ===
+
+# --- Đọc Doanh thu (khách cũ/mới/tổng) cho 1 tuần ---
+def read_revenue(tab_name, target_thang, target_tuan):
+    ws = sh.worksheet(tab_name)
+    rows = ws.get_all_values()
+    header = rows[HEADER_ROW - 1]
+    idx = find_doanh_thu_cols(header)
+    if not idx["thang"] or not idx["total"]:
+        return {"khach_cu": 0, "khach_moi": 0, "total": 0}
+
+    def parse_money(s):
+        s = re.sub(r"[^\d]", "", str(s))
+        return int(s) if s else 0
+
+    # Forward-fill Tháng (cột S merged cells, các row giữa block trống)
+    cur_thang = None
+    for row in rows[HEADER_ROW:]:
+        if len(row) < idx["tuan"]:
+            continue
+        v_thang = row[idx["thang"] - 1].strip()
+        v_tuan = row[idx["tuan"] - 1].strip()
+        if v_thang:
+            cur_thang = v_thang
+        if cur_thang != str(target_thang) or v_tuan != str(target_tuan):
+            continue
+        return {
+            "khach_cu": parse_money(row[idx["kc_old"] - 1]) if idx["kc_old"] and idx["kc_old"] <= len(row) else 0,
+            "khach_moi": parse_money(row[idx["kc_new"] - 1]) if idx["kc_new"] and idx["kc_new"] <= len(row) else 0,
+            "total": parse_money(row[idx["total"] - 1]) if idx["total"] <= len(row) else 0,
+        }
+    return {"khach_cu": 0, "khach_moi": 0, "total": 0}
+
 
 # --- Đọc Form/Hotline/Zalo/Mess + Tổng data nhóm cho 1 tuần ---
 def read_conversions(tab_name, target_thang, target_tuan):
@@ -319,7 +453,7 @@ def read_conversions(tab_name, target_thang, target_tuan):
 # --- State management trong tab _bot_state ---
 STATE_TAB = "_bot_state"
 STATE_HEADER = ["week_id", "thang", "tuan", "ngay_bd", "ngay_kt",
-                "initial_sent_at", "conversion_sent_at", "last_check_at"]
+                "initial_sent_at", "conversion_sent_at", "revenue_sent_at", "last_check_at"]
 
 
 def get_state_tab():
@@ -496,36 +630,80 @@ _Báo cáo này chỉ có chi tiêu. Bot sẽ tự gửi báo cáo hiệu quả 
 ℹ️ Đợi NV cập nhật Form/Hotline/Zalo/Mess. Bot check 3 lần/ngày."""
 
 
-def build_full_msg(is_followup):
-    """Báo cáo có conversion: Python control layout, Claude chỉ gen 5 đoạn đánh giá."""
-    bac_cost, bac_data, bac_block = build_full_block("Bắc", conv_bac)
-    nam_cost, nam_data, nam_block = build_full_block("Nam", conv_nam)
+def build_full_msg(has_conv, has_rev):
+    """Báo cáo có conversion và/hoặc revenue. Python control layout, Claude gen 5 đoạn đánh giá."""
+    use_conv_bac = conv_bac if has_conv else {}
+    use_conv_nam = conv_nam if has_conv else {}
+
+    bac_cost, bac_data, bac_block = build_full_block("Bắc", use_conv_bac)
+    nam_cost, nam_data, nam_block = build_full_block("Nam", use_conv_nam)
     bac_cpa = bac_cost // bac_data if bac_data > 0 else 0
     nam_cpa = nam_cost // nam_data if nam_data > 0 else 0
 
-    # Gọi Claude CHỈ gen 5 trường đánh giá ngắn — không đụng layout
+    # Header line per miền
+    bac_hdr_p = [fmt_money(bac_cost)]
+    nam_hdr_p = [fmt_money(nam_cost)]
+    if has_conv:
+        bac_hdr_p += [f"{bac_data} data", f"CPA TB {fmt_short(bac_cpa)}"]
+        nam_hdr_p += [f"{nam_data} data", f"CPA TB {fmt_short(nam_cpa)}"]
+    bac_hdr = " · ".join(bac_hdr_p)
+    nam_hdr = " · ".join(nam_hdr_p)
+
+    # Revenue blocks
+    bac_rev_str = ""
+    nam_rev_str = ""
+    bac_roas = nam_roas = 0
+    if has_rev:
+        bac_roas = rev_bac["total"] / bac_cost if bac_cost > 0 else 0
+        nam_roas = rev_nam["total"] / nam_cost if nam_cost > 0 else 0
+        bac_rev_str = (
+            f"\n\n💵 *Doanh thu*: {fmt_money(rev_bac['total'])}"
+            f"\n   Khách cũ: {fmt_money(rev_bac['khach_cu'])} · Khách mới: {fmt_money(rev_bac['khach_moi'])}"
+            f"\n   ROAS: {bac_roas:.1f}x (chi 1đ → ra {bac_roas:.1f}đ)"
+        )
+        nam_rev_str = (
+            f"\n\n💵 *Doanh thu*: {fmt_money(rev_nam['total'])}"
+            f"\n   Khách cũ: {fmt_money(rev_nam['khach_cu'])} · Khách mới: {fmt_money(rev_nam['khach_moi'])}"
+            f"\n   ROAS: {nam_roas:.1f}x (chi 1đ → ra {nam_roas:.1f}đ)"
+        )
+
+    # Eval context cho Claude
+    eval_ctx = ""
+    if has_conv:
+        eval_ctx += f"CPA TB: Bắc {fmt_short(bac_cpa)} · Nam {fmt_short(nam_cpa)}\n"
+    if has_rev:
+        eval_ctx += (f"Doanh thu: Bắc {fmt_money(rev_bac['total'])} (ROAS {bac_roas:.1f}x) · "
+                     f"Nam {fmt_money(rev_nam['total'])} (ROAS {nam_roas:.1f}x)\n")
+    eval_focus = ""
+    if has_rev:
+        eval_focus = "ƯU TIÊN phân tích ROAS (doanh thu/chi tiêu). ROAS<1 = lỗ, ROAS 2-5 = OK, >5 = tốt."
+    elif has_conv:
+        eval_focus = "Phân tích CPA per nhóm SP. CPA cao bất thường (>2x TB) hoặc 0 data → cảnh báo."
+
     eval_raw = call_claude(f"""Bạn là analyst Google Ads cho VDG (B2B bao bì).
 
-DATA TUẦN: {ngay_bd_str} → {ngay_kt_str}
-
-MIỀN BẮC (chi {fmt_money(bac_cost)}, {bac_data} data, CPA TB {fmt_short(bac_cpa)}):
+DATA TUẦN {ngay_bd_str} → {ngay_kt_str}:
+{eval_ctx}
+MIỀN BẮC (chi {fmt_money(bac_cost)}):
 {bac_block}
 
-MIỀN NAM (chi {fmt_money(nam_cost)}, {nam_data} data, CPA TB {fmt_short(nam_cpa)}):
+MIỀN NAM (chi {fmt_money(nam_cost)}):
 {nam_block}
 
-Trả về CHỈ JSON, KHÔNG markdown bao quanh:
+{eval_focus}
+
+Trả về CHỈ JSON:
 {{
-  "bac_warn": "<1 dòng cảnh báo Bắc, max 30 chữ. Ưu tiên: nhóm chi nhiều CPA cao bất thường, HOẶC nhóm 0 data. Nếu OK → 'Không có cảnh báo lớn'>",
-  "bac_action": "<1 dòng đề xuất Bắc. Phải có động từ Scale/Pause/Tăng/Giảm + tên nhóm + số liệu>",
+  "bac_warn": "<1 dòng cảnh báo Bắc, max 30 chữ, có số. Nếu OK → 'Không có cảnh báo lớn'>",
+  "bac_action": "<1 dòng đề xuất, có động từ Scale/Pause/Tăng/Giảm + tên nhóm + số>",
   "nam_warn": "<1 dòng cảnh báo Nam>",
   "nam_action": "<1 dòng đề xuất Nam>",
-  "summary": "<1-2 câu: so sánh CPA + data Bắc vs Nam, kèm 1 ưu tiên hành động duy nhất tuần tới>"
+  "summary": "<1-2 câu: so sánh hiệu quả Bắc vs Nam, kèm 1 ưu tiên action>"
 }}
 
 QUY TẮC:
-- Số tiền dạng "20k", "1.5tr", "7.3tr" — KHÔNG dấu phẩy
-- Hành động cụ thể, có số. KHÔNG dùng "cần xem xét", "có thể tối ưu", "cần điều chỉnh"
+- Số tiền dạng "20k", "1.5tr"
+- KHÔNG dùng "cần xem xét", "có thể tối ưu" — phải có động từ + số
 """)
     raw = re.sub(r"^```(?:json)?|```$", "", eval_raw.strip(), flags=re.MULTILINE).strip()
     try:
@@ -536,25 +714,31 @@ QUY TẮC:
               "nam_warn": "(lỗi parse)", "nam_action": "—",
               "summary": raw[:200]}
 
-    title = "📊 *Báo cáo CẬP NHẬT (sau khi NV điền)*" if is_followup else "📊 *Báo cáo HIỆU QUẢ*"
-    fnote = "✅ NV đã cập nhật conversion.\n\n" if is_followup else "\n"
+    # Tiêu đề tùy theo loại data có
+    if has_rev and has_conv:
+        title = "📊 *Báo cáo HIỆU QUẢ ĐẦY ĐỦ* (chi · data · doanh thu)"
+    elif has_rev:
+        title = "📊 *Báo cáo DOANH THU* _(NV chưa cập nhật conversion)_"
+    else:  # has_conv only
+        title = "📊 *Báo cáo CHUYỂN ĐỔI* _(chưa có doanh thu)_"
 
     return f"""{title} *Tuần {tuan_trong_thang}/Tháng {thang}* ({short_bd} - {short_kt})
-{fnote}🌏 *Tổng 2 miền*: {fmt_money(total_spend)}
+
+🌏 *Tổng 2 miền*: {fmt_money(total_spend)}
    Bắc {fmt_money(bac_cost)} ({bac_pct}%) / Nam {fmt_money(nam_cost)} ({nam_pct}%)
 
 ━━━━━━━━━━━━━━
-🅱️ *MIỀN BẮC* — {fmt_money(bac_cost)} · {bac_data} data · CPA TB {fmt_short(bac_cpa)}
+🅱️ *MIỀN BẮC* — {bac_hdr}
 
-{bac_block}
+{bac_block}{bac_rev_str}
 
 ⚠️ {ev['bac_warn']}
 💡 {ev['bac_action']}
 
 ━━━━━━━━━━━━━━
-🅽 *MIỀN NAM* — {fmt_money(nam_cost)} · {nam_data} data · CPA TB {fmt_short(nam_cpa)}
+🅽 *MIỀN NAM* — {nam_hdr}
 
-{nam_block}
+{nam_block}{nam_rev_str}
 
 ⚠️ {ev['nam_warn']}
 💡 {ev['nam_action']}
@@ -572,46 +756,57 @@ print(f"  Week ID: {week_id}")
 print(f"  State: initial={state.get('initial_sent_at') or '(empty)'}, "
       f"conversion={state.get('conversion_sent_at') or '(empty)'}")
 
-print(f"\n→ Đọc conversions từ 2 sheet báo cáo...")
+print(f"\n→ Đọc conversions + revenue từ 2 sheet báo cáo...")
 conv_bac = read_conversions(TAB_BAC, thang, tuan_trong_thang)
 conv_nam = read_conversions(TAB_NAM, thang, tuan_trong_thang)
 total_conv_bac = sum(v["total"] for v in conv_bac.values())
 total_conv_nam = sum(v["total"] for v in conv_nam.values())
-has_conversion = (total_conv_bac + total_conv_nam) > 0
-print(f"  Bắc: {total_conv_bac} data | Nam: {total_conv_nam} data | has_conversion={has_conversion}")
+has_conv = (total_conv_bac + total_conv_nam) > 0
+
+rev_bac = read_revenue(TAB_BAC, thang, tuan_trong_thang)
+rev_nam = read_revenue(TAB_NAM, thang, tuan_trong_thang)
+total_rev = rev_bac["total"] + rev_nam["total"]
+has_rev = total_rev > 0
+
+print(f"  Conversion: Bắc {total_conv_bac} · Nam {total_conv_nam} → has_conv={has_conv}")
+print(f"  Revenue: Bắc {fmt_money(rev_bac['total'])} · Nam {fmt_money(rev_nam['total'])} → has_rev={has_rev}")
+
+# Level: 1=initial, 2=conversion, 3=revenue (đã có doanh thu)
+current_level = 3 if has_rev else (2 if has_conv else 1)
+
+# Levels đã gửi trước đó
+levels_sent = []
+if (state.get("initial_sent_at") or "").strip(): levels_sent.append(1)
+if (state.get("conversion_sent_at") or "").strip(): levels_sent.append(2)
+if (state.get("revenue_sent_at") or "").strip(): levels_sent.append(3)
+max_sent = max(levels_sent) if levels_sent else 0
+print(f"  Current level: {current_level} | Max sent: {max_sent}")
 
 now_str = datetime.now(zoneinfo.ZoneInfo("Asia/Ho_Chi_Minh")).strftime("%Y-%m-%d %H:%M")
-initial_sent = (state.get("initial_sent_at") or "").strip()
-conv_sent = (state.get("conversion_sent_at") or "").strip()
 
-if args.force or not initial_sent:
-    label = "FORCE" if args.force else "LẦN ĐẦU"
-    print(f"\n→ {label} — gửi báo cáo cho tuần này...")
-    if has_conversion:
-        print("  Có conversion data → gửi báo cáo HIỆU QUẢ")
-        ok = send_telegram(build_full_msg(is_followup=False))
-        if ok:
-            upsert_state(ws_state, week_id,
-                         thang=thang, tuan=tuan_trong_thang,
-                         ngay_bd=ngay_bd_str, ngay_kt=ngay_kt_str,
-                         initial_sent_at=now_str, conversion_sent_at=now_str,
-                         last_check_at=now_str)
-    else:
-        print("  Chưa có conversion → gửi báo cáo CHI TIÊU (initial only)")
-        ok = send_telegram(build_initial_msg())
-        if ok:
-            upsert_state(ws_state, week_id,
-                         thang=thang, tuan=tuan_trong_thang,
-                         ngay_bd=ngay_bd_str, ngay_kt=ngay_kt_str,
-                         initial_sent_at=now_str, conversion_sent_at="",
-                         last_check_at=now_str)
-elif not conv_sent and has_conversion:
-    print(f"\n→ NV đã cập nhật → gửi báo cáo HIỆU QUẢ (follow-up)...")
-    ok = send_telegram(build_full_msg(is_followup=True))
-    if ok:
-        upsert_state(ws_state, week_id, conversion_sent_at=now_str, last_check_at=now_str)
+if args.force or current_level > max_sent:
+    print(f"\n→ {'FORCE' if args.force else 'NEW LEVEL'} — gửi báo cáo level {current_level}...")
+    if current_level == 1:
+        msg = build_initial_msg()
+        sent_field = "initial_sent_at"
+    elif current_level == 2:
+        msg = build_full_msg(has_conv=True, has_rev=False)
+        sent_field = "conversion_sent_at"
+    else:  # 3
+        msg = build_full_msg(has_conv=has_conv, has_rev=True)
+        sent_field = "revenue_sent_at"
+
+    if send_telegram(msg):
+        update_kwargs = {sent_field: now_str, "last_check_at": now_str}
+        # Lần đầu cho week này → populate metadata
+        if not state:
+            update_kwargs.update({
+                "thang": thang, "tuan": tuan_trong_thang,
+                "ngay_bd": ngay_bd_str, "ngay_kt": ngay_kt_str,
+            })
+        upsert_state(ws_state, week_id, **update_kwargs)
 else:
-    print(f"\n→ Đã gửi đủ. Skip Telegram, chỉ update last_check_at.")
+    print(f"\n→ Đã gửi level {max_sent} ≥ current {current_level}. Skip Telegram.")
     upsert_state(ws_state, week_id, last_check_at=now_str)
 
 print(f"\n✓ Done!")
