@@ -301,39 +301,49 @@ def send_telegram_report():
     prompt = f"""Bạn là analyst Google Ads cho công ty Vua Đóng Gói (B2B bao bì).
 
 DATA TUẦN: {ngay_bd_str} → {ngay_kt_str} (Tháng {thang}, Tuần {tuan_trong_thang})
-Tổng chi: {total_spend:,}đ — Bắc {bac_pct}% / Nam {nam_pct}%
+Tổng chi 2 miền: {total_spend:,}đ — Bắc {bac_pct}% / Nam {nam_pct}%
 
 Tổng hợp theo (miền, nhóm SP):
 {summary_str}
 
-Chi tiết từng dòng:
+Chi tiết từng dòng (có ad group, CTR, CPC):
 {detail_str}
 
-VIẾT 1 TIN NHẮN TELEGRAM ngắn gọn (<400 chữ tiếng Việt):
+VIẾT 1 TIN NHẮN TELEGRAM TÁCH RIÊNG 2 MIỀN, định dạng đúng như khung dưới đây (tiếng Việt, <600 chữ):
 
 📊 *Báo cáo Tuần {tuan_trong_thang}/Tháng {thang}* ({ngay_bd_str.replace('/2026', '')} - {ngay_kt_str.replace('/2026', '')})
 
-💰 *Tổng chi*: ...đ
-🌏 *Phân bổ*: Bắc XX% / Nam XX%
+🌏 *Tổng 2 miền*: {total_spend:,}đ — Bắc {bac_pct}% / Nam {nam_pct}%
 
-🏆 *Top 3 nhóm SP chi nhiều nhất:*
+━━━━━━━━━━━━━━━━━
+🅱️ *MIỀN BẮC*
+💰 Chi: ...đ
+🏆 Top nhóm:
+1. ... — ...đ (XX%)
+2. ...
+3. ...
+🚨 Cảnh báo: (CTR thấp, CPC bất thường, chi nhiều ít click...) hoặc "Không có"
+💡 Đề xuất: 1-2 ý cụ thể
+
+━━━━━━━━━━━━━━━━━
+🅽 *MIỀN NAM*
+💰 Chi: ...đ
+🏆 Top nhóm:
 1. ...
 2. ...
 3. ...
+🚨 Cảnh báo: ... hoặc "Không có"
+💡 Đề xuất: 1-2 ý cụ thể
 
-🚨 *Cảnh báo* (nếu có):
-- Nhóm/campaign nào CTR thấp bất thường (<5%)
-- Nhóm chi nhiều nhưng ít click
-- Khác biệt Bắc/Nam đáng chú ý
+━━━━━━━━━━━━━━━━━
+🔍 *Đánh giá tổng*: 1-2 câu so sánh Bắc vs Nam, điểm cần chú ý chung.
 
-💡 *Đề xuất hành động* (1-2 ý):
-- ...
-
-Quy tắc:
-- Markdown Telegram: *bold*, _italic_, KHÔNG dùng ## hay ** (chỉ 1 dấu *)
-- Số tiền dùng dấu chấm: 7.316.100đ
-- Concise, không lan man
-- Nếu không có anomaly thì viết: "🚨 Không có cảnh báo."
+QUY TẮC FORMAT:
+- Telegram Markdown: *bold*, _italic_. KHÔNG dùng ** hoặc ##
+- Số tiền dấu chấm: 7.316.100đ
+- Mỗi cảnh báo / đề xuất 1 dòng ngắn, có số liệu cụ thể
+- KHÔNG lan man, KHÔNG dùng từ chung chung như "cần xem xét lại"
+- Nếu 1 nhóm SP không có data trong miền nào, KHÔNG bịa, ghi "(không chạy)"
 """
 
     client = Anthropic()
