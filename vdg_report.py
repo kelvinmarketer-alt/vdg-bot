@@ -8,6 +8,7 @@ import sys
 import json
 import re
 import argparse
+import zoneinfo
 import pandas as pd
 import gspread
 from datetime import datetime, date, timedelta
@@ -60,6 +61,7 @@ parser = argparse.ArgumentParser(description="VDG weekly report")
 parser.add_argument("--from", dest="from_date", help="dd/mm/yyyy (override)")
 parser.add_argument("--to", dest="to_date", help="dd/mm/yyyy (override)")
 parser.add_argument("-y", "--yes", action="store_true", help="Bỏ qua confirm, ghi luôn")
+parser.add_argument("--force", action="store_true", help="Bỏ qua state, gửi báo cáo bất kể đã gửi chưa")
 args = parser.parse_args()
 
 if args.from_date and args.to_date:
@@ -269,115 +271,316 @@ ghi_mien("Nam", TAB_NAM)
 print(f"\n✓ Sheet đã update: https://docs.google.com/spreadsheets/d/{SHEET_ID}")
 
 
-# === STEP 5: PHÂN TÍCH + GỬI TELEGRAM ===
-def send_telegram_report():
+# === STEP 5: STATE-AWARE TELEGRAM REPORTING ===
+
+# --- Đọc Form/Hotline/Zalo/Mess + Tổng data nhóm cho 1 tuần ---
+def read_conversions(tab_name, target_thang, target_tuan):
+    ws = sh.worksheet(tab_name)
+    rows = ws.get_all_values()
+    header = rows[HEADER_ROW - 1]
+    idx = {
+        "thang": find_col_nth(header, "tháng", 2),
+        "tuan": find_col_nth(header, "tuần", 2),
+        "nhom": find_col_nth(header, "nhóm sp", 1),
+        "total": find_col_nth(header, "tổng data nhóm", 1),
+        "form": find_col_nth(header, "form", 1),
+        "hotline": find_col_nth(header, "hotline", 1),
+        "zalo": find_col_nth(header, "zalo", 1),
+        "mess": find_col_nth(header, "mess", 1),
+    }
+
+    def parse_int(s):
+        s = str(s).strip()
+        if not s or s == "-":
+            return 0
+        try:
+            return int(float(s.replace(",", ".")))
+        except Exception:
+            return 0
+
+    result = {}
+    for row in rows[HEADER_ROW:]:
+        if len(row) < 8:
+            continue
+        if row[idx["thang"] - 1].strip() != str(target_thang):
+            continue
+        if row[idx["tuan"] - 1].strip() != str(target_tuan):
+            continue
+        nhom = row[idx["nhom"] - 1].strip() if idx["nhom"] and idx["nhom"] <= len(row) else ""
+        if not nhom:
+            continue
+        result[nhom] = {
+            k: parse_int(row[idx[k] - 1]) if idx[k] and idx[k] <= len(row) else 0
+            for k in ["form", "hotline", "zalo", "mess", "total"]
+        }
+    return result
+
+
+# --- State management trong tab _bot_state ---
+STATE_TAB = "_bot_state"
+STATE_HEADER = ["week_id", "thang", "tuan", "ngay_bd", "ngay_kt",
+                "initial_sent_at", "conversion_sent_at", "last_check_at"]
+
+
+def get_state_tab():
+    try:
+        ws = sh.worksheet(STATE_TAB)
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(STATE_TAB, rows=200, cols=10)
+        ws.update("A1", [STATE_HEADER])
+        return ws
+    rows = ws.get_all_values()
+    if not rows or rows[0][:len(STATE_HEADER)] != STATE_HEADER:
+        ws.update("A1", [STATE_HEADER])
+    return ws
+
+
+def get_state(ws, week_id):
+    rows = ws.get_all_values()
+    if len(rows) < 2:
+        return {}
+    for row in rows[1:]:
+        if row and row[0] == week_id:
+            return dict(zip(rows[0], row + [""] * (len(rows[0]) - len(row))))
+    return {}
+
+
+def upsert_state(ws, week_id, **fields):
+    fields["week_id"] = week_id  # đảm bảo cột week_id luôn được set
+    rows = ws.get_all_values()
+    header = rows[0] if rows else STATE_HEADER
+    target = None
+    for i, row in enumerate(rows[1:], start=2):
+        if row and row[0] == week_id:
+            target = i
+            break
+    if target:
+        existing = dict(zip(header, rows[target - 1] + [""] * (len(header) - len(rows[target - 1]))))
+        existing.update({k: str(v) for k, v in fields.items()})
+        ws.update(f"A{target}", [[existing.get(h, "") for h in header]])
+    else:
+        new_data = {h: "" for h in header}
+        new_data.update({k: str(v) for k, v in fields.items()})
+        ws.append_row([new_data.get(h, "") for h in header])
+
+
+# --- Telegram + Claude helpers ---
+def call_claude(prompt):
+    resp = client.messages.create(
+        model="claude-opus-4-7", max_tokens=2000,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return resp.content[0].text.strip()
+
+
+def send_telegram(msg):
     import urllib.request
     import urllib.parse
-
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
     if not token or not chat_id:
-        print("\n⚠️ Thiếu TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID, bỏ qua send")
-        return
+        print("⚠️ Thiếu TELEGRAM credentials, skip send")
+        return False
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    data = urllib.parse.urlencode({
+        "chat_id": chat_id, "text": msg, "parse_mode": "Markdown",
+        "disable_web_page_preview": "true",
+    }).encode("utf-8")
+    try:
+        urllib.request.urlopen(urllib.request.Request(url, data=data), timeout=15)
+        print("✓ Telegram đã gửi")
+        return True
+    except Exception as e:
+        print(f"❌ Markdown lỗi ({e}), thử plain text...")
+        try:
+            data_plain = urllib.parse.urlencode({"chat_id": chat_id, "text": msg}).encode("utf-8")
+            urllib.request.urlopen(urllib.request.Request(url, data=data_plain), timeout=15)
+            print("✓ Telegram đã gửi (plain)")
+            return True
+        except Exception as e2:
+            print(f"❌ Fallback lỗi: {e2}")
+            return False
 
-    print("\n→ Đang phân tích + tạo báo cáo Telegram...")
 
-    # Tổng hợp toàn cảnh để gửi cho Claude
-    total_spend = int(df["cost"].sum())
-    by_mien = df.groupby("mien")["cost"].sum().to_dict()
-    bac_pct = round(by_mien.get("Bắc", 0) / total_spend * 100, 1) if total_spend else 0
-    nam_pct = round(by_mien.get("Nam", 0) / total_spend * 100, 1) if total_spend else 0
+# --- Aggregates dùng chung ---
+total_spend = int(df["cost"].sum())
+by_mien = df.groupby("mien")["cost"].sum().to_dict()
+bac_pct = round(by_mien.get("Bắc", 0) / total_spend * 100, 1) if total_spend else 0
+nam_pct = round(by_mien.get("Nam", 0) / total_spend * 100, 1) if total_spend else 0
+summary_str = summary.to_string(index=False)
+short_bd = ngay_bd_str.replace("/2026", "")
+short_kt = ngay_kt_str.replace("/2026", "")
 
-    # Detail có CTR/CPC nếu có
-    has_perf = "ctr" in df.columns
-    if has_perf:
-        detail_str = df[["campaign", "ad_group", "mien", "nhom_sp",
-                         "cost", "impressions", "clicks", "ctr", "cpc"]].to_string(index=False)
-    else:
-        detail_str = df[["campaign", "ad_group", "mien", "nhom_sp", "cost"]].to_string(index=False)
 
-    summary_str = summary.to_string(index=False)
+# --- Build messages ---
+def build_initial_msg():
+    """Báo cáo CHỈ chi tiêu, note NV chưa cập nhật."""
+    return call_claude(f"""Bạn là analyst Google Ads cho VDG (B2B bao bì).
 
-    prompt = f"""Bạn là analyst Google Ads cho công ty Vua Đóng Gói (B2B bao bì).
+DATA CHI TIÊU TUẦN: {ngay_bd_str} → {ngay_kt_str} (Tháng {thang}, Tuần {tuan_trong_thang})
+Tổng chi: {total_spend:,}đ — Bắc {bac_pct}% / Nam {nam_pct}%
 
-DATA TUẦN: {ngay_bd_str} → {ngay_kt_str} (Tháng {thang}, Tuần {tuan_trong_thang})
-Tổng chi 2 miền: {total_spend:,}đ — Bắc {bac_pct}% / Nam {nam_pct}%
-
-Tổng hợp theo (miền, nhóm SP):
+Tổng hợp:
 {summary_str}
 
-Chi tiết từng dòng (có ad group, CTR, CPC):
-{detail_str}
+CONVERSION: CHƯA CÓ DATA — nhân viên chưa cập nhật Form/Hotline/Zalo/Mess.
 
-VIẾT 1 TIN NHẮN TELEGRAM TÁCH RIÊNG 2 MIỀN, định dạng đúng như khung dưới đây (tiếng Việt, <600 chữ):
+VIẾT TIN NHẮN TELEGRAM (<400 chữ tiếng Việt). KHÔNG được phân tích hiệu quả chuyển đổi (vì chưa có data). Format đúng khung dưới:
 
-📊 *Báo cáo Tuần {tuan_trong_thang}/Tháng {thang}* ({ngay_bd_str.replace('/2026', '')} - {ngay_kt_str.replace('/2026', '')})
+📊 *Báo cáo CHI TIÊU Tuần {tuan_trong_thang}/Tháng {thang}* ({short_bd} - {short_kt})
+
+⚠️ *Nhân viên chưa cập nhật thông tin về chuyển đổi.*
+👉 Báo cáo này CHỈ phản ánh chi tiêu. Bot sẽ tự gửi báo cáo hiệu quả khi NV cập nhật xong.
 
 🌏 *Tổng 2 miền*: {total_spend:,}đ — Bắc {bac_pct}% / Nam {nam_pct}%
 
 ━━━━━━━━━━━━━━━━━
-🅱️ *MIỀN BẮC*
-💰 Chi: ...đ
-🏆 Top nhóm:
+🅱️ *MIỀN BẮC* — Chi: ...đ
+🏆 Top 3 nhóm:
 1. ... — ...đ (XX%)
 2. ...
 3. ...
-🚨 Cảnh báo: (CTR thấp, CPC bất thường, chi nhiều ít click...) hoặc "Không có"
-💡 Đề xuất: 1-2 ý cụ thể
 
 ━━━━━━━━━━━━━━━━━
-🅽 *MIỀN NAM*
-💰 Chi: ...đ
-🏆 Top nhóm:
+🅽 *MIỀN NAM* — Chi: ...đ
+🏆 Top 3 nhóm:
 1. ...
 2. ...
 3. ...
-🚨 Cảnh báo: ... hoặc "Không có"
-💡 Đề xuất: 1-2 ý cụ thể
 
 ━━━━━━━━━━━━━━━━━
-🔍 *Đánh giá tổng*: 1-2 câu so sánh Bắc vs Nam, điểm cần chú ý chung.
+ℹ️ Đợi nhân viên cập nhật. Bot check 3 lần/ngày.
 
-QUY TẮC FORMAT:
-- Telegram Markdown: *bold*, _italic_. KHÔNG dùng ** hoặc ##
+QUY TẮC:
+- *bold* Markdown, KHÔNG ## hay **
 - Số tiền dấu chấm: 7.316.100đ
-- Mỗi cảnh báo / đề xuất 1 dòng ngắn, có số liệu cụ thể
-- KHÔNG lan man, KHÔNG dùng từ chung chung như "cần xem xét lại"
-- Nếu 1 nhóm SP không có data trong miền nào, KHÔNG bịa, ghi "(không chạy)"
-"""
-
-    client = Anthropic()
-    resp = client.messages.create(
-        model="claude-opus-4-7",
-        max_tokens=1500,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    msg = resp.content[0].text.strip()
-
-    # Send Telegram
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    data = urllib.parse.urlencode({
-        "chat_id": chat_id,
-        "text": msg,
-        "parse_mode": "Markdown",
-        "disable_web_page_preview": "true",
-    }).encode("utf-8")
-    try:
-        req = urllib.request.Request(url, data=data)
-        with urllib.request.urlopen(req, timeout=15) as r:
-            print(f"✓ Telegram đã gửi (HTTP {r.status})")
-    except Exception as e:
-        print(f"❌ Telegram lỗi: {e}")
-        # Fallback: gửi không có markdown nếu lỗi parse
-        try:
-            data_plain = urllib.parse.urlencode({
-                "chat_id": chat_id, "text": msg
-            }).encode("utf-8")
-            urllib.request.urlopen(urllib.request.Request(url, data=data_plain), timeout=15)
-            print(f"✓ Telegram đã gửi (plain text fallback)")
-        except Exception as e2:
-            print(f"❌ Fallback cũng lỗi: {e2}")
+- KHÔNG đánh giá hiệu quả/CPA/tốt-xấu
+- KHÔNG dùng metric CTR/click làm tiêu chí đánh giá
+""")
 
 
-send_telegram_report()
+def build_full_msg(is_followup):
+    """Báo cáo có conversion, phân tích CPA, đánh giá hiệu quả."""
+    conv_lines = []
+    for mien_label, conv in [("BẮC", conv_bac), ("NAM", conv_nam)]:
+        for nhom, v in conv.items():
+            if any(v[k] > 0 for k in ["form", "hotline", "zalo", "mess", "total"]):
+                conv_lines.append(
+                    f"  {mien_label}/{nhom}: form={v['form']}, hotline={v['hotline']}, "
+                    f"zalo={v['zalo']}, mess={v['mess']}, TỔNG DATA={v['total']}"
+                )
+    conv_str = "\n".join(conv_lines) or "  (chưa có data)"
+
+    cpa_lines = []
+    for mien_label, conv in [("Bắc", conv_bac), ("Nam", conv_nam)]:
+        for nhom, v in conv.items():
+            cost_for = int(summary[(summary.mien == mien_label) & (summary.nhom_sp == nhom)]["cost"].sum())
+            if v["total"] > 0 and cost_for > 0:
+                cpa = int(cost_for / v["total"])
+                cpa_lines.append(f"  {mien_label}/{nhom}: chi {cost_for:,}đ ÷ {v['total']} data = CPA {cpa:,}đ/data")
+            elif cost_for > 0 and v["total"] == 0:
+                cpa_lines.append(f"  {mien_label}/{nhom}: chi {cost_for:,}đ NHƯNG 0 data → ❌ KHÔNG HIỆU QUẢ")
+    cpa_str = "\n".join(cpa_lines) or "  (chưa tính được)"
+
+    title = "📊 *Báo cáo CẬP NHẬT (sau khi NV điền)*" if is_followup else "📊 *Báo cáo HIỆU QUẢ Tuần*"
+    followup_note = "✅ NV đã cập nhật conversion → đây là báo cáo hiệu quả thật.\n" if is_followup else ""
+
+    return call_claude(f"""Bạn là analyst Google Ads cho VDG (B2B bao bì).
+
+DATA TUẦN: {ngay_bd_str} → {ngay_kt_str} (Tháng {thang}, Tuần {tuan_trong_thang})
+Tổng chi: {total_spend:,}đ — Bắc {bac_pct}% / Nam {nam_pct}%
+
+CHI TIÊU theo (miền, nhóm SP):
+{summary_str}
+
+CONVERSION (NV đã cập nhật):
+{conv_str}
+
+CPA tính sẵn:
+{cpa_str}
+
+VIẾT TIN NHẮN TELEGRAM (<700 chữ tiếng Việt). PHÂN TÍCH HIỆU QUẢ CHUYỂN ĐỔI (CPA) là chính. KHÔNG dùng CTR/click làm metric đánh giá. Format đúng khung dưới:
+
+{title} *Tuần {tuan_trong_thang}/Tháng {thang}* ({short_bd} - {short_kt})
+
+{followup_note}🌏 *Tổng 2 miền*: {total_spend:,}đ — Bắc {bac_pct}% / Nam {nam_pct}%
+
+━━━━━━━━━━━━━━━━━
+🅱️ *MIỀN BẮC*
+💰 Chi: ...đ → Data thu về: ... → CPA TB: ...đ/data
+🏆 Hiệu quả top 3 nhóm (CPA thấp = tốt):
+1. NhómA — chi ...đ ÷ ...data → CPA ...đ
+2. ...
+3. ...
+🚨 Cảnh báo: (gọi rõ tên nhóm + số liệu cụ thể)
+   - Nhóm có chi nhưng 0 data → ❌
+   - Nhóm CPA cao bất thường (>2x TB) → ⚠️
+💡 Đề xuất: 1-2 ý hành động cụ thể, có số liệu (vd "Tăng budget Zipper Bắc 20% — CPA chỉ 50k", "Pause Bao bì Bắc — chi 7tr không có data")
+
+━━━━━━━━━━━━━━━━━
+🅽 *MIỀN NAM*
+[tương tự miền Bắc]
+
+━━━━━━━━━━━━━━━━━
+🔍 *Tổng kết*: 1-2 câu so sánh Bắc vs Nam (CPA, conversion volume), action priority tuần tới.
+
+QUY TẮC:
+- *bold* Markdown
+- Số tiền dấu chấm: 7.316.100đ; CPA dạng "250.000đ/data"
+- Action-oriented, có số liệu cụ thể, KHÔNG lan man
+- Nếu nhóm có chi nhưng 0 conversion → đánh dấu "❌" rõ ràng
+""")
+
+
+# --- Decision tree (state machine) ---
+print(f"\n→ Đọc state tab _bot_state...")
+ws_state = get_state_tab()
+week_id = f"{ngay_bd.year}-W{ngay_bd.isocalendar()[1]:02d}"
+state = get_state(ws_state, week_id)
+print(f"  Week ID: {week_id}")
+print(f"  State: initial={state.get('initial_sent_at') or '(empty)'}, "
+      f"conversion={state.get('conversion_sent_at') or '(empty)'}")
+
+print(f"\n→ Đọc conversions từ 2 sheet báo cáo...")
+conv_bac = read_conversions(TAB_BAC, thang, tuan_trong_thang)
+conv_nam = read_conversions(TAB_NAM, thang, tuan_trong_thang)
+total_conv_bac = sum(v["total"] for v in conv_bac.values())
+total_conv_nam = sum(v["total"] for v in conv_nam.values())
+has_conversion = (total_conv_bac + total_conv_nam) > 0
+print(f"  Bắc: {total_conv_bac} data | Nam: {total_conv_nam} data | has_conversion={has_conversion}")
+
+now_str = datetime.now(zoneinfo.ZoneInfo("Asia/Ho_Chi_Minh")).strftime("%Y-%m-%d %H:%M")
+initial_sent = (state.get("initial_sent_at") or "").strip()
+conv_sent = (state.get("conversion_sent_at") or "").strip()
+
+if args.force or not initial_sent:
+    label = "FORCE" if args.force else "LẦN ĐẦU"
+    print(f"\n→ {label} — gửi báo cáo cho tuần này...")
+    if has_conversion:
+        print("  Có conversion data → gửi báo cáo HIỆU QUẢ")
+        ok = send_telegram(build_full_msg(is_followup=False))
+        if ok:
+            upsert_state(ws_state, week_id,
+                         thang=thang, tuan=tuan_trong_thang,
+                         ngay_bd=ngay_bd_str, ngay_kt=ngay_kt_str,
+                         initial_sent_at=now_str, conversion_sent_at=now_str,
+                         last_check_at=now_str)
+    else:
+        print("  Chưa có conversion → gửi báo cáo CHI TIÊU (initial only)")
+        ok = send_telegram(build_initial_msg())
+        if ok:
+            upsert_state(ws_state, week_id,
+                         thang=thang, tuan=tuan_trong_thang,
+                         ngay_bd=ngay_bd_str, ngay_kt=ngay_kt_str,
+                         initial_sent_at=now_str, conversion_sent_at="",
+                         last_check_at=now_str)
+elif not conv_sent and has_conversion:
+    print(f"\n→ NV đã cập nhật → gửi báo cáo HIỆU QUẢ (follow-up)...")
+    ok = send_telegram(build_full_msg(is_followup=True))
+    if ok:
+        upsert_state(ws_state, week_id, conversion_sent_at=now_str, last_check_at=now_str)
+else:
+    print(f"\n→ Đã gửi đủ. Skip Telegram, chỉ update last_check_at.")
+    upsert_state(ws_state, week_id, last_check_at=now_str)
+
 print(f"\n✓ Done!")

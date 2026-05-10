@@ -1,9 +1,10 @@
 name: VDG Weekly Report
 
 on:
-  # Tự chạy mỗi thứ 2 lúc 8:00 AM giờ Việt Nam (1:00 UTC)
+  # Chạy 3 lần/ngày (8am, 4pm, 8pm giờ VN) để bắt được conversion update của NV
+  # State machine sẽ tự dedup, chỉ gửi Telegram khi có thay đổi
   schedule:
-    - cron: '0 1 * * 1'
+    - cron: '0 1,9,13 * * *'
   # Cho phép trigger tay từ tab Actions trên GitHub
   workflow_dispatch:
 
