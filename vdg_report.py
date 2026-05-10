@@ -414,48 +414,45 @@ short_kt = ngay_kt_str.replace("/2026", "")
 
 # --- Build messages ---
 def build_initial_msg():
-    """Báo cáo CHỈ chi tiêu, note NV chưa cập nhật."""
+    """Báo cáo CHỈ chi tiêu, note NV chưa cập nhật. Format COMPACT."""
     return call_claude(f"""Bạn là analyst Google Ads cho VDG (B2B bao bì).
 
 DATA CHI TIÊU TUẦN: {ngay_bd_str} → {ngay_kt_str} (Tháng {thang}, Tuần {tuan_trong_thang})
 Tổng chi: {total_spend:,}đ — Bắc {bac_pct}% / Nam {nam_pct}%
 
-Tổng hợp:
 {summary_str}
 
-CONVERSION: CHƯA CÓ DATA — nhân viên chưa cập nhật Form/Hotline/Zalo/Mess.
+CONVERSION: CHƯA CÓ DATA — NV chưa cập nhật Form/Hotline/Zalo/Mess.
 
-VIẾT TIN NHẮN TELEGRAM (<400 chữ tiếng Việt). KHÔNG được phân tích hiệu quả chuyển đổi (vì chưa có data). Format đúng khung dưới:
+VIẾT TIN NHẮN TELEGRAM CỰC KỲ COMPACT, DỄ ĐỌC. Tối đa 200 chữ tiếng Việt. ĐÚNG FORMAT khung dưới (giữ nguyên blank lines, dấu ━━━):
 
-📊 *Báo cáo CHI TIÊU Tuần {tuan_trong_thang}/Tháng {thang}* ({short_bd} - {short_kt})
+📊 *Tuần {tuan_trong_thang}/Tháng {thang}* ({short_bd} - {short_kt})
 
-⚠️ *Nhân viên chưa cập nhật thông tin về chuyển đổi.*
-👉 Báo cáo này CHỈ phản ánh chi tiêu. Bot sẽ tự gửi báo cáo hiệu quả khi NV cập nhật xong.
+⚠️ *NV chưa cập nhật conversion*
+_Báo cáo CHI TIÊU. Bot sẽ gửi báo cáo hiệu quả khi NV cập nhật._
 
-🌏 *Tổng 2 miền*: {total_spend:,}đ — Bắc {bac_pct}% / Nam {nam_pct}%
+🌏 Tổng: {total_spend:,}đ · Bắc {bac_pct}% / Nam {nam_pct}%
 
-━━━━━━━━━━━━━━━━━
-🅱️ *MIỀN BẮC* — Chi: ...đ
-🏆 Top 3 nhóm:
-1. ... — ...đ (XX%)
-2. ...
-3. ...
+━━━━━━━━━━━━━━
+🅱️ *MIỀN BẮC* · ...đ
 
-━━━━━━━━━━━━━━━━━
-🅽 *MIỀN NAM* — Chi: ...đ
-🏆 Top 3 nhóm:
-1. ...
-2. ...
-3. ...
+🥇 ... · ...đ
+🥈 ...
+🥉 ...
 
-━━━━━━━━━━━━━━━━━
-ℹ️ Đợi nhân viên cập nhật. Bot check 3 lần/ngày.
+━━━━━━━━━━━━━━
+🅽 *MIỀN NAM* · ...đ
+
+🥇 ...
+🥈 ...
+🥉 ...
 
 QUY TẮC:
-- *bold* Markdown, KHÔNG ## hay **
-- Số tiền dấu chấm: 7.316.100đ
-- KHÔNG đánh giá hiệu quả/CPA/tốt-xấu
-- KHÔNG dùng metric CTR/click làm tiêu chí đánh giá
+- *bold* Markdown (1 dấu sao), KHÔNG ##
+- Tiền: 7.316.100đ. Số nhỏ: 44k, 423k
+- Mỗi top dòng riêng, ngắn: "Tên · giá tiền"
+- KHÔNG phân tích CPA/hiệu quả/cảnh báo (chưa có conversion data)
+- BẮT BUỘC giữ blank line giữa header và top, giữa các miền
 """)
 
 
@@ -499,36 +496,43 @@ CONVERSION (NV đã cập nhật):
 CPA tính sẵn:
 {cpa_str}
 
-VIẾT TIN NHẮN TELEGRAM (<700 chữ tiếng Việt). PHÂN TÍCH HIỆU QUẢ CHUYỂN ĐỔI (CPA) là chính. KHÔNG dùng CTR/click làm metric đánh giá. Format đúng khung dưới:
+VIẾT TIN NHẮN TELEGRAM CỰC KỲ COMPACT, DỄ ĐỌC. Tối đa 350 chữ tiếng Việt. PHÂN TÍCH HIỆU QUẢ CHUYỂN ĐỔI (CPA) là chính. ĐÚNG FORMAT khung dưới (giữ nguyên blank lines, dấu ━━━, ký tự "·"):
 
 {title} *Tuần {tuan_trong_thang}/Tháng {thang}* ({short_bd} - {short_kt})
+{followup_note}
+🌏 Tổng: {total_spend:,}đ · Bắc {bac_pct}% / Nam {nam_pct}%
 
-{followup_note}🌏 *Tổng 2 miền*: {total_spend:,}đ — Bắc {bac_pct}% / Nam {nam_pct}%
-
-━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━
 🅱️ *MIỀN BẮC*
-💰 Chi: ...đ → Data thu về: ... → CPA TB: ...đ/data
-🏆 Hiệu quả top 3 nhóm (CPA thấp = tốt):
-1. NhómA — chi ...đ ÷ ...data → CPA ...đ
-2. ...
-3. ...
-🚨 Cảnh báo: (gọi rõ tên nhóm + số liệu cụ thể)
-   - Nhóm có chi nhưng 0 data → ❌
-   - Nhóm CPA cao bất thường (>2x TB) → ⚠️
-💡 Đề xuất: 1-2 ý hành động cụ thể, có số liệu (vd "Tăng budget Zipper Bắc 20% — CPA chỉ 50k", "Pause Bao bì Bắc — chi 7tr không có data")
 
-━━━━━━━━━━━━━━━━━
+💰 ...đ · ... data · CPA TB ...k
+
+🥇 NhómA · CPA ...k 🔥
+🥈 NhómB · CPA ...k
+🥉 NhómC · CPA ...k
+
+⚠️ 1 cảnh báo quan trọng nhất (vd "Bao bì ngốn 93% nhưng CPA 203k cao gấp 2x TB")
+❌ (nếu có) Nhóm chi nhưng 0 data: ...
+
+💡 1 đề xuất cụ thể có số (vd "Scale Zipper x3, CPA chỉ 20k")
+
+━━━━━━━━━━━━━━
 🅽 *MIỀN NAM*
-[tương tự miền Bắc]
 
-━━━━━━━━━━━━━━━━━
-🔍 *Tổng kết*: 1-2 câu so sánh Bắc vs Nam (CPA, conversion volume), action priority tuần tới.
+[lặp lại format y hệt miền Bắc]
 
-QUY TẮC:
-- *bold* Markdown
-- Số tiền dấu chấm: 7.316.100đ; CPA dạng "250.000đ/data"
-- Action-oriented, có số liệu cụ thể, KHÔNG lan man
-- Nếu nhóm có chi nhưng 0 conversion → đánh dấu "❌" rõ ràng
+━━━━━━━━━━━━━━
+🔍 1 câu so sánh + 1 action ưu tiên duy nhất.
+
+QUY TẮC FORMAT:
+- *bold* Markdown (1 dấu sao), KHÔNG dùng **
+- Tiền lớn: 7.316.100đ. CPA gọn dạng "20k" hoặc "203k" thay vì "203.000đ"
+- Mỗi top 1 dòng inline: "Tên nhóm · CPA"
+- Cảnh báo MAX 2 dòng/miền, mỗi dòng ngắn (<25 chữ)
+- Đề xuất 1 dòng/miền (action + lý do số)
+- Tổng kết cuối 1-2 câu DUY NHẤT
+- BẮT BUỘC: blank line giữa header miền và Chi/CPA, giữa CPA và top 3, giữa top và cảnh báo
+- KHÔNG dùng từ chung chung: "cần xem xét", "có thể tối ưu". PHẢI có động từ + con số
 """)
 
 
