@@ -412,128 +412,155 @@ short_bd = ngay_bd_str.replace("/2026", "")
 short_kt = ngay_kt_str.replace("/2026", "")
 
 
+# --- Format helpers ---
+def fmt_money(n):
+    """7316100 → '7.316.100đ'."""
+    return f"{int(n):,}đ".replace(",", ".")
+
+
+def fmt_short(n):
+    """20114 → '20k'; 1500000 → '1.5tr'; 500 → '500đ'."""
+    n = int(n)
+    if n == 0:
+        return "—"
+    if n < 1000:
+        return f"{n}đ"
+    if n < 1_000_000:
+        return f"{n // 1000}k"
+    return f"{n / 1_000_000:.1f}tr"
+
+
+def cost_for(mien_label, nhom):
+    return int(summary[(summary.mien == mien_label) & (summary.nhom_sp == nhom)]["cost"].sum())
+
+
+def build_cost_block(mien_label):
+    """Liệt kê 5 nhóm SP với chi tiêu. (cho initial msg)"""
+    lines = []
+    total = 0
+    for nhom in NHOM_SP:
+        c = cost_for(mien_label, nhom)
+        if c > 0:
+            lines.append(f"📦 {nhom}: {fmt_money(c)}")
+            total += c
+        else:
+            lines.append(f"📦 {nhom}: _(không chạy)_")
+    return total, "\n".join(lines)
+
+
+def build_full_block(mien_label, conv_dict):
+    """Liệt kê 5 nhóm SP với chi · data · CPA. (cho full msg)"""
+    lines = []
+    total_c = 0
+    total_d = 0
+    for nhom in NHOM_SP:
+        c = cost_for(mien_label, nhom)
+        d = conv_dict.get(nhom, {}).get("total", 0) if conv_dict else 0
+        if c > 0:
+            if d == 0:
+                lines.append(f"📦 {nhom}: {fmt_money(c)} · 0 data · ❌")
+            else:
+                cpa = c // d
+                lines.append(f"📦 {nhom}: {fmt_money(c)} · {d} data · CPA {fmt_short(cpa)}")
+            total_c += c
+            total_d += d
+        else:
+            lines.append(f"📦 {nhom}: _(không chạy)_")
+    return total_c, total_d, "\n".join(lines)
+
+
 # --- Build messages ---
 def build_initial_msg():
-    """Báo cáo CHỈ chi tiêu, note NV chưa cập nhật. Format COMPACT."""
-    return call_claude(f"""Bạn là analyst Google Ads cho VDG (B2B bao bì).
-
-DATA CHI TIÊU TUẦN: {ngay_bd_str} → {ngay_kt_str} (Tháng {thang}, Tuần {tuan_trong_thang})
-Tổng chi: {total_spend:,}đ — Bắc {bac_pct}% / Nam {nam_pct}%
-
-{summary_str}
-
-CONVERSION: CHƯA CÓ DATA — NV chưa cập nhật Form/Hotline/Zalo/Mess.
-
-VIẾT TIN NHẮN TELEGRAM CỰC KỲ COMPACT, DỄ ĐỌC. Tối đa 200 chữ tiếng Việt. ĐÚNG FORMAT khung dưới (giữ nguyên blank lines, dấu ━━━):
-
-📊 *Tuần {tuan_trong_thang}/Tháng {thang}* ({short_bd} - {short_kt})
+    """Báo cáo CHỈ chi tiêu — Python build full layout (không dùng Claude)."""
+    bac_cost, bac_block = build_cost_block("Bắc")
+    nam_cost, nam_block = build_cost_block("Nam")
+    return f"""📊 *Báo cáo CHI TIÊU Tuần {tuan_trong_thang}/Tháng {thang}* ({short_bd} - {short_kt})
 
 ⚠️ *NV chưa cập nhật conversion*
-_Báo cáo CHI TIÊU. Bot sẽ gửi báo cáo hiệu quả khi NV cập nhật._
+_Báo cáo này chỉ có chi tiêu. Bot sẽ tự gửi báo cáo hiệu quả khi NV cập nhật xong._
 
-🌏 Tổng: {total_spend:,}đ · Bắc {bac_pct}% / Nam {nam_pct}%
-
-━━━━━━━━━━━━━━
-🅱️ *MIỀN BẮC* · ...đ
-
-🥇 ... · ...đ
-🥈 ...
-🥉 ...
+🌏 *Tổng 2 miền*: {fmt_money(total_spend)}
+   Bắc {fmt_money(bac_cost)} ({bac_pct}%) / Nam {fmt_money(nam_cost)} ({nam_pct}%)
 
 ━━━━━━━━━━━━━━
-🅽 *MIỀN NAM* · ...đ
+🅱️ *MIỀN BẮC* — {fmt_money(bac_cost)}
 
-🥇 ...
-🥈 ...
-🥉 ...
+{bac_block}
 
-QUY TẮC:
-- *bold* Markdown (1 dấu sao), KHÔNG ##
-- Tiền: 7.316.100đ. Số nhỏ: 44k, 423k
-- Mỗi top dòng riêng, ngắn: "Tên · giá tiền"
-- KHÔNG phân tích CPA/hiệu quả/cảnh báo (chưa có conversion data)
-- BẮT BUỘC giữ blank line giữa header và top, giữa các miền
-""")
+━━━━━━━━━━━━━━
+🅽 *MIỀN NAM* — {fmt_money(nam_cost)}
+
+{nam_block}
+
+━━━━━━━━━━━━━━
+ℹ️ Đợi NV cập nhật Form/Hotline/Zalo/Mess. Bot check 3 lần/ngày."""
 
 
 def build_full_msg(is_followup):
-    """Báo cáo có conversion, phân tích CPA, đánh giá hiệu quả."""
-    conv_lines = []
-    for mien_label, conv in [("BẮC", conv_bac), ("NAM", conv_nam)]:
-        for nhom, v in conv.items():
-            if any(v[k] > 0 for k in ["form", "hotline", "zalo", "mess", "total"]):
-                conv_lines.append(
-                    f"  {mien_label}/{nhom}: form={v['form']}, hotline={v['hotline']}, "
-                    f"zalo={v['zalo']}, mess={v['mess']}, TỔNG DATA={v['total']}"
-                )
-    conv_str = "\n".join(conv_lines) or "  (chưa có data)"
+    """Báo cáo có conversion: Python control layout, Claude chỉ gen 5 đoạn đánh giá."""
+    bac_cost, bac_data, bac_block = build_full_block("Bắc", conv_bac)
+    nam_cost, nam_data, nam_block = build_full_block("Nam", conv_nam)
+    bac_cpa = bac_cost // bac_data if bac_data > 0 else 0
+    nam_cpa = nam_cost // nam_data if nam_data > 0 else 0
 
-    cpa_lines = []
-    for mien_label, conv in [("Bắc", conv_bac), ("Nam", conv_nam)]:
-        for nhom, v in conv.items():
-            cost_for = int(summary[(summary.mien == mien_label) & (summary.nhom_sp == nhom)]["cost"].sum())
-            if v["total"] > 0 and cost_for > 0:
-                cpa = int(cost_for / v["total"])
-                cpa_lines.append(f"  {mien_label}/{nhom}: chi {cost_for:,}đ ÷ {v['total']} data = CPA {cpa:,}đ/data")
-            elif cost_for > 0 and v["total"] == 0:
-                cpa_lines.append(f"  {mien_label}/{nhom}: chi {cost_for:,}đ NHƯNG 0 data → ❌ KHÔNG HIỆU QUẢ")
-    cpa_str = "\n".join(cpa_lines) or "  (chưa tính được)"
+    # Gọi Claude CHỈ gen 5 trường đánh giá ngắn — không đụng layout
+    eval_raw = call_claude(f"""Bạn là analyst Google Ads cho VDG (B2B bao bì).
 
-    title = "📊 *Báo cáo CẬP NHẬT (sau khi NV điền)*" if is_followup else "📊 *Báo cáo HIỆU QUẢ Tuần*"
-    followup_note = "✅ NV đã cập nhật conversion → đây là báo cáo hiệu quả thật.\n" if is_followup else ""
+DATA TUẦN: {ngay_bd_str} → {ngay_kt_str}
 
-    return call_claude(f"""Bạn là analyst Google Ads cho VDG (B2B bao bì).
+MIỀN BẮC (chi {fmt_money(bac_cost)}, {bac_data} data, CPA TB {fmt_short(bac_cpa)}):
+{bac_block}
 
-DATA TUẦN: {ngay_bd_str} → {ngay_kt_str} (Tháng {thang}, Tuần {tuan_trong_thang})
-Tổng chi: {total_spend:,}đ — Bắc {bac_pct}% / Nam {nam_pct}%
+MIỀN NAM (chi {fmt_money(nam_cost)}, {nam_data} data, CPA TB {fmt_short(nam_cpa)}):
+{nam_block}
 
-CHI TIÊU theo (miền, nhóm SP):
-{summary_str}
+Trả về CHỈ JSON, KHÔNG markdown bao quanh:
+{{
+  "bac_warn": "<1 dòng cảnh báo Bắc, max 30 chữ. Ưu tiên: nhóm chi nhiều CPA cao bất thường, HOẶC nhóm 0 data. Nếu OK → 'Không có cảnh báo lớn'>",
+  "bac_action": "<1 dòng đề xuất Bắc. Phải có động từ Scale/Pause/Tăng/Giảm + tên nhóm + số liệu>",
+  "nam_warn": "<1 dòng cảnh báo Nam>",
+  "nam_action": "<1 dòng đề xuất Nam>",
+  "summary": "<1-2 câu: so sánh CPA + data Bắc vs Nam, kèm 1 ưu tiên hành động duy nhất tuần tới>"
+}}
 
-CONVERSION (NV đã cập nhật):
-{conv_str}
-
-CPA tính sẵn:
-{cpa_str}
-
-VIẾT TIN NHẮN TELEGRAM CỰC KỲ COMPACT, DỄ ĐỌC. Tối đa 350 chữ tiếng Việt. PHÂN TÍCH HIỆU QUẢ CHUYỂN ĐỔI (CPA) là chính. ĐÚNG FORMAT khung dưới (giữ nguyên blank lines, dấu ━━━, ký tự "·"):
-
-{title} *Tuần {tuan_trong_thang}/Tháng {thang}* ({short_bd} - {short_kt})
-{followup_note}
-🌏 Tổng: {total_spend:,}đ · Bắc {bac_pct}% / Nam {nam_pct}%
-
-━━━━━━━━━━━━━━
-🅱️ *MIỀN BẮC*
-
-💰 ...đ · ... data · CPA TB ...k
-
-🥇 NhómA · CPA ...k 🔥
-🥈 NhómB · CPA ...k
-🥉 NhómC · CPA ...k
-
-⚠️ 1 cảnh báo quan trọng nhất (vd "Bao bì ngốn 93% nhưng CPA 203k cao gấp 2x TB")
-❌ (nếu có) Nhóm chi nhưng 0 data: ...
-
-💡 1 đề xuất cụ thể có số (vd "Scale Zipper x3, CPA chỉ 20k")
-
-━━━━━━━━━━━━━━
-🅽 *MIỀN NAM*
-
-[lặp lại format y hệt miền Bắc]
-
-━━━━━━━━━━━━━━
-🔍 1 câu so sánh + 1 action ưu tiên duy nhất.
-
-QUY TẮC FORMAT:
-- *bold* Markdown (1 dấu sao), KHÔNG dùng **
-- Tiền lớn: 7.316.100đ. CPA gọn dạng "20k" hoặc "203k" thay vì "203.000đ"
-- Mỗi top 1 dòng inline: "Tên nhóm · CPA"
-- Cảnh báo MAX 2 dòng/miền, mỗi dòng ngắn (<25 chữ)
-- Đề xuất 1 dòng/miền (action + lý do số)
-- Tổng kết cuối 1-2 câu DUY NHẤT
-- BẮT BUỘC: blank line giữa header miền và Chi/CPA, giữa CPA và top 3, giữa top và cảnh báo
-- KHÔNG dùng từ chung chung: "cần xem xét", "có thể tối ưu". PHẢI có động từ + con số
+QUY TẮC:
+- Số tiền dạng "20k", "1.5tr", "7.3tr" — KHÔNG dấu phẩy
+- Hành động cụ thể, có số. KHÔNG dùng "cần xem xét", "có thể tối ưu", "cần điều chỉnh"
 """)
+    raw = re.sub(r"^```(?:json)?|```$", "", eval_raw.strip(), flags=re.MULTILINE).strip()
+    try:
+        ev = json.loads(raw)
+    except Exception as e:
+        print(f"⚠️ Parse JSON eval lỗi: {e}")
+        ev = {"bac_warn": "(lỗi parse)", "bac_action": "—",
+              "nam_warn": "(lỗi parse)", "nam_action": "—",
+              "summary": raw[:200]}
+
+    title = "📊 *Báo cáo CẬP NHẬT (sau khi NV điền)*" if is_followup else "📊 *Báo cáo HIỆU QUẢ*"
+    fnote = "✅ NV đã cập nhật conversion.\n\n" if is_followup else "\n"
+
+    return f"""{title} *Tuần {tuan_trong_thang}/Tháng {thang}* ({short_bd} - {short_kt})
+{fnote}🌏 *Tổng 2 miền*: {fmt_money(total_spend)}
+   Bắc {fmt_money(bac_cost)} ({bac_pct}%) / Nam {fmt_money(nam_cost)} ({nam_pct}%)
+
+━━━━━━━━━━━━━━
+🅱️ *MIỀN BẮC* — {fmt_money(bac_cost)} · {bac_data} data · CPA TB {fmt_short(bac_cpa)}
+
+{bac_block}
+
+⚠️ {ev['bac_warn']}
+💡 {ev['bac_action']}
+
+━━━━━━━━━━━━━━
+🅽 *MIỀN NAM* — {fmt_money(nam_cost)} · {nam_data} data · CPA TB {fmt_short(nam_cpa)}
+
+{nam_block}
+
+⚠️ {ev['nam_warn']}
+💡 {ev['nam_action']}
+
+━━━━━━━━━━━━━━
+🔍 {ev['summary']}"""
 
 
 # --- Decision tree (state machine) ---
