@@ -452,8 +452,13 @@ def read_conversions(tab_name, target_thang, target_tuan):
 
 # --- State management trong tab _bot_state ---
 STATE_TAB = "_bot_state"
+# Schema mới: track 4 cờ độc lập per miền (Bắc/Nam) × loại (conv/rev)
+# Khi bất kỳ cờ nào flip từ trống → có timestamp, bot gửi báo cáo cập nhật
 STATE_HEADER = ["week_id", "thang", "tuan", "ngay_bd", "ngay_kt",
-                "initial_sent_at", "conversion_sent_at", "revenue_sent_at", "last_check_at"]
+                "initial_sent_at",
+                "bac_conv_at", "nam_conv_at",
+                "bac_rev_at", "nam_rev_at",
+                "last_check_at"]
 
 
 def get_state_tab():
@@ -630,8 +635,8 @@ _Báo cáo này chỉ có chi tiêu. Bot sẽ tự gửi báo cáo hiệu quả 
 ℹ️ Đợi NV cập nhật Form/Hotline/Zalo/Mess. Bot check 3 lần/ngày."""
 
 
-def build_full_msg(has_conv, has_rev):
-    """Báo cáo có conversion và/hoặc revenue. Python control layout, Claude gen 5 đoạn đánh giá."""
+def build_full_msg(has_conv, has_rev, new_flags=None):
+    """Báo cáo có conversion và/hoặc revenue. new_flags = dict {bac_conv, nam_conv, bac_rev, nam_rev} → True nếu vừa cập nhật."""
     use_conv_bac = conv_bac if has_conv else {}
     use_conv_nam = conv_nam if has_conv else {}
 
@@ -722,8 +727,17 @@ QUY TẮC:
     else:  # has_conv only
         title = "📊 *Báo cáo CHUYỂN ĐỔI* _(chưa có doanh thu)_"
 
-    return f"""{title} *Tuần {tuan_trong_thang}/Tháng {thang}* ({short_bd} - {short_kt})
+    # Dòng "Vừa cập nhật" — nếu là follow-up báo cho user biết miền nào vừa điền thêm
+    new_flags = new_flags or {}
+    new_items = []
+    if new_flags.get("bac_conv"): new_items.append("Bắc conversion")
+    if new_flags.get("nam_conv"): new_items.append("Nam conversion")
+    if new_flags.get("bac_rev"): new_items.append("Bắc doanh thu")
+    if new_flags.get("nam_rev"): new_items.append("Nam doanh thu")
+    update_line = f"\n✅ _Vừa cập nhật: {', '.join(new_items)}_\n" if new_items else "\n"
 
+    return f"""{title} *Tuần {tuan_trong_thang}/Tháng {thang}* ({short_bd} - {short_kt})
+{update_line}
 🌏 *Tổng 2 miền*: {fmt_money(total_spend)}
    Bắc {fmt_money(bac_cost)} ({bac_pct}%) / Nam {fmt_money(nam_cost)} ({nam_pct}%)
 
@@ -761,52 +775,77 @@ conv_bac = read_conversions(TAB_BAC, thang, tuan_trong_thang)
 conv_nam = read_conversions(TAB_NAM, thang, tuan_trong_thang)
 total_conv_bac = sum(v["total"] for v in conv_bac.values())
 total_conv_nam = sum(v["total"] for v in conv_nam.values())
-has_conv = (total_conv_bac + total_conv_nam) > 0
 
 rev_bac = read_revenue(TAB_BAC, thang, tuan_trong_thang)
 rev_nam = read_revenue(TAB_NAM, thang, tuan_trong_thang)
-total_rev = rev_bac["total"] + rev_nam["total"]
-has_rev = total_rev > 0
 
-print(f"  Conversion: Bắc {total_conv_bac} · Nam {total_conv_nam} → has_conv={has_conv}")
-print(f"  Revenue: Bắc {fmt_money(rev_bac['total'])} · Nam {fmt_money(rev_nam['total'])} → has_rev={has_rev}")
+# 4 cờ data hiện tại (per miền × loại)
+cur_bac_conv = total_conv_bac > 0
+cur_nam_conv = total_conv_nam > 0
+cur_bac_rev = rev_bac["total"] > 0
+cur_nam_rev = rev_nam["total"] > 0
+has_conv = cur_bac_conv or cur_nam_conv
+has_rev = cur_bac_rev or cur_nam_rev
 
-# Level: 1=initial, 2=conversion, 3=revenue (đã có doanh thu)
-current_level = 3 if has_rev else (2 if has_conv else 1)
+print(f"  Conversion: Bắc {total_conv_bac} · Nam {total_conv_nam}")
+print(f"  Revenue: Bắc {fmt_money(rev_bac['total'])} · Nam {fmt_money(rev_nam['total'])}")
+print(f"  Cờ data: bac_conv={cur_bac_conv}, nam_conv={cur_nam_conv}, "
+      f"bac_rev={cur_bac_rev}, nam_rev={cur_nam_rev}")
 
-# Levels đã gửi trước đó
-levels_sent = []
-if (state.get("initial_sent_at") or "").strip(): levels_sent.append(1)
-if (state.get("conversion_sent_at") or "").strip(): levels_sent.append(2)
-if (state.get("revenue_sent_at") or "").strip(): levels_sent.append(3)
-max_sent = max(levels_sent) if levels_sent else 0
-print(f"  Current level: {current_level} | Max sent: {max_sent}")
+# 4 cờ đã gửi (per miền × loại) — đọc từ state
+state_bac_conv = bool((state.get("bac_conv_at") or "").strip())
+state_nam_conv = bool((state.get("nam_conv_at") or "").strip())
+state_bac_rev = bool((state.get("bac_rev_at") or "").strip())
+state_nam_rev = bool((state.get("nam_rev_at") or "").strip())
+state_initial = bool((state.get("initial_sent_at") or "").strip())
+print(f"  Đã gửi: initial={state_initial}, bac_conv={state_bac_conv}, "
+      f"nam_conv={state_nam_conv}, bac_rev={state_bac_rev}, nam_rev={state_nam_rev}")
+
+# Phát hiện flip: data có nhưng state chưa ghi nhận → cần gửi cập nhật
+new_bac_conv = cur_bac_conv and not state_bac_conv
+new_nam_conv = cur_nam_conv and not state_nam_conv
+new_bac_rev = cur_bac_rev and not state_bac_rev
+new_nam_rev = cur_nam_rev and not state_nam_rev
+any_new = new_bac_conv or new_nam_conv or new_bac_rev or new_nam_rev
 
 now_str = datetime.now(zoneinfo.ZoneInfo("Asia/Ho_Chi_Minh")).strftime("%Y-%m-%d %H:%M")
 
-if args.force or current_level > max_sent:
-    print(f"\n→ {'FORCE' if args.force else 'NEW LEVEL'} — gửi báo cáo level {current_level}...")
-    if current_level == 1:
+# Quyết định gửi:
+# 1. Force: luôn gửi
+# 2. Initial chưa gửi + không có data: gửi initial
+# 3. Có data mới (flip): gửi báo cáo cập nhật
+need_send = args.force or any_new or (not state_initial and not has_conv and not has_rev)
+
+if need_send:
+    new_flags = {
+        "bac_conv": new_bac_conv, "nam_conv": new_nam_conv,
+        "bac_rev": new_bac_rev, "nam_rev": new_nam_rev,
+    }
+    print(f"\n→ {'FORCE' if args.force else 'CẬP NHẬT MỚI'} — gửi báo cáo...")
+    print(f"  Cờ mới: {new_flags}")
+
+    if not has_conv and not has_rev:
         msg = build_initial_msg()
-        sent_field = "initial_sent_at"
-    elif current_level == 2:
-        msg = build_full_msg(has_conv=True, has_rev=False)
-        sent_field = "conversion_sent_at"
-    else:  # 3
-        msg = build_full_msg(has_conv=has_conv, has_rev=True)
-        sent_field = "revenue_sent_at"
+    else:
+        msg = build_full_msg(has_conv=has_conv, has_rev=has_rev, new_flags=new_flags)
 
     if send_telegram(msg):
-        update_kwargs = {sent_field: now_str, "last_check_at": now_str}
-        # Lần đầu cho week này → populate metadata
+        update_kwargs = {"last_check_at": now_str}
+        # Lần đầu — populate metadata
         if not state:
             update_kwargs.update({
                 "thang": thang, "tuan": tuan_trong_thang,
                 "ngay_bd": ngay_bd_str, "ngay_kt": ngay_kt_str,
             })
+        if not state_initial:
+            update_kwargs["initial_sent_at"] = now_str
+        if new_bac_conv: update_kwargs["bac_conv_at"] = now_str
+        if new_nam_conv: update_kwargs["nam_conv_at"] = now_str
+        if new_bac_rev: update_kwargs["bac_rev_at"] = now_str
+        if new_nam_rev: update_kwargs["nam_rev_at"] = now_str
         upsert_state(ws_state, week_id, **update_kwargs)
 else:
-    print(f"\n→ Đã gửi level {max_sent} ≥ current {current_level}. Skip Telegram.")
+    print(f"\n→ Không có data mới so với state. Skip Telegram.")
     upsert_state(ws_state, week_id, last_check_at=now_str)
 
 print(f"\n✓ Done!")
