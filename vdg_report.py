@@ -588,8 +588,11 @@ def build_cost_block(mien_label):
     return total, "\n".join(lines)
 
 
-def build_full_block(mien_label, conv_dict):
-    """Liệt kê 5 nhóm SP với chi · data · CPA. (cho full msg)"""
+def build_full_block(mien_label, conv_dict, conv_filled):
+    """Liệt kê 5 nhóm SP với chi · data · CPA. (cho full msg)
+
+    conv_filled=False → miền có chi tiêu nhưng NV CHƯA điền data: chỉ hiện chi tiêu,
+    KHÔNG hiện '0 data · ❌' (tránh hiểu nhầm chiến dịch ra 0 chuyển đổi)."""
     lines = []
     total_c = 0
     total_d = 0
@@ -597,7 +600,9 @@ def build_full_block(mien_label, conv_dict):
         c = cost_for(mien_label, nhom)
         d = conv_dict.get(nhom, {}).get("total", 0) if conv_dict else 0
         if c > 0:
-            if d == 0:
+            if not conv_filled:
+                lines.append(f"📦 {nhom}: {fmt_money(c)} · _chờ NV điền data_")
+            elif d == 0:
                 lines.append(f"📦 {nhom}: {fmt_money(c)} · 0 data · ❌")
             else:
                 cpa = c // d
@@ -616,8 +621,8 @@ def build_initial_msg():
     nam_cost, nam_block = build_cost_block("Nam")
     return f"""📊 *Báo cáo CHI TIÊU Tuần {tuan_trong_thang}/Tháng {thang}* ({short_bd} - {short_kt})
 
-⚠️ *NV chưa cập nhật conversion*
-_Báo cáo này chỉ có chi tiêu. Bot sẽ tự gửi báo cáo hiệu quả khi NV cập nhật xong._
+🔔 *NV CHƯA ĐIỀN SỐ LIỆU* (data chuyển đổi + doanh thu)
+_Báo cáo này mới chỉ có chi tiêu QC. Đề nghị các sếp nhắc NV phụ trách điền Form/Hotline/Zalo/Mess + doanh thu. Bot sẽ tự gửi lại báo cáo hiệu quả khi NV cập nhật xong._
 
 🌏 *Tổng 2 miền*: {fmt_money(total_spend)}
    Bắc {fmt_money(bac_cost)} ({bac_pct}%) / Nam {fmt_money(nam_cost)} ({nam_pct}%)
@@ -636,99 +641,145 @@ _Báo cáo này chỉ có chi tiêu. Bot sẽ tự gửi báo cáo hiệu quả 
 ℹ️ Đợi NV cập nhật Form/Hotline/Zalo/Mess. Bot check 3 lần/ngày."""
 
 
-def build_full_msg(has_conv, has_rev, new_flags=None):
-    """Báo cáo có conversion và/hoặc revenue. new_flags = dict {bac_conv, nam_conv, bac_rev, nam_rev} → True nếu vừa cập nhật."""
-    use_conv_bac = conv_bac if has_conv else {}
-    use_conv_nam = conv_nam if has_conv else {}
+def build_full_msg(new_flags=None):
+    """Báo cáo theo TỪNG miền. Miền nào có chi tiêu nhưng NV chưa điền data/doanh thu
+    sẽ được note rõ 'NV chưa điền — cần sếp nhắc', KHÔNG để LLM nhận xét/đề xuất tắt.
+    new_flags = dict {bac_conv, nam_conv, bac_rev, nam_rev} → True nếu vừa cập nhật."""
 
-    bac_cost, bac_data, bac_block = build_full_block("Bắc", use_conv_bac)
-    nam_cost, nam_data, nam_block = build_full_block("Nam", use_conv_nam)
-    bac_cpa = bac_cost // bac_data if bac_data > 0 else 0
-    nam_cpa = nam_cost // nam_data if nam_data > 0 else 0
+    # Gom thông tin mỗi miền. conv_filled/rev_filled = NV đã điền data/doanh thu chưa
+    # (đọc từ cờ per-miền tính ở phần decision tree bên dưới).
+    regions = {
+        "Bắc": {"icon": "🅱️", "name": "MIỀN BẮC", "conv": conv_bac, "rev": rev_bac,
+                "conv_filled": cur_bac_conv, "rev_filled": cur_bac_rev},
+        "Nam": {"icon": "🅽", "name": "MIỀN NAM", "conv": conv_nam, "rev": rev_nam,
+                "conv_filled": cur_nam_conv, "rev_filled": cur_nam_rev},
+    }
 
-    # Header line per miền
-    bac_hdr_p = [fmt_money(bac_cost)]
-    nam_hdr_p = [fmt_money(nam_cost)]
-    if has_conv:
-        bac_hdr_p += [f"{bac_data} data", f"CPA TB {fmt_short(bac_cpa)}"]
-        nam_hdr_p += [f"{nam_data} data", f"CPA TB {fmt_short(nam_cpa)}"]
-    bac_hdr = " · ".join(bac_hdr_p)
-    nam_hdr = " · ".join(nam_hdr_p)
+    for lbl, R in regions.items():
+        c, d, block = build_full_block(lbl, R["conv"] if R["conv_filled"] else {}, R["conv_filled"])
+        R.update(cost=c, data=d, block=block,
+                 cpa=c // d if d > 0 else 0, spending=c > 0)
+        # Có chi tiêu mà chưa điền data/doanh thu → "NV chưa điền" (KHÔNG phải campaign hỏng)
+        R["conv_pending"] = R["spending"] and not R["conv_filled"]
+        R["rev_pending"] = R["spending"] and not R["rev_filled"]
+        # NV chưa điền GÌ cả cho miền có chạy → cần nhắc sếp, bỏ qua phần nhận xét hiệu quả
+        R["nv_missing"] = R["spending"] and not R["conv_filled"] and not R["rev_filled"]
 
-    # Revenue blocks
-    bac_rev_str = ""
-    nam_rev_str = ""
-    bac_roas = nam_roas = 0
-    if has_rev:
-        bac_roas = rev_bac["total"] / bac_cost if bac_cost > 0 else 0
-        nam_roas = rev_nam["total"] / nam_cost if nam_cost > 0 else 0
-        bac_rev_str = (
-            f"\n\n💵 *Doanh thu*: {fmt_money(rev_bac['total'])}"
-            f"\n   Khách cũ: {fmt_money(rev_bac['khach_cu'])} · Khách mới: {fmt_money(rev_bac['khach_moi'])}"
-            f"\n   ROAS: {bac_roas:.1f}x (chi 1đ → ra {bac_roas:.1f}đ)"
-        )
-        nam_rev_str = (
-            f"\n\n💵 *Doanh thu*: {fmt_money(rev_nam['total'])}"
-            f"\n   Khách cũ: {fmt_money(rev_nam['khach_cu'])} · Khách mới: {fmt_money(rev_nam['khach_moi'])}"
-            f"\n   ROAS: {nam_roas:.1f}x (chi 1đ → ra {nam_roas:.1f}đ)"
-        )
+        # Header line
+        hdr = [fmt_money(c)]
+        if R["conv_filled"]:
+            hdr += [f"{d} data", f"CPA TB {fmt_short(R['cpa'])}"]
+        elif R["conv_pending"]:
+            hdr.append("⏳ chờ NV điền data")
+        R["hdr"] = " · ".join(hdr)
 
-    # Eval context cho LLM
-    eval_ctx = ""
-    if has_conv:
-        eval_ctx += f"CPA TB: Bắc {fmt_short(bac_cpa)} · Nam {fmt_short(nam_cpa)}\n"
-    if has_rev:
-        eval_ctx += (f"Doanh thu: Bắc {fmt_money(rev_bac['total'])} (ROAS {bac_roas:.1f}x) · "
-                     f"Nam {fmt_money(rev_nam['total'])} (ROAS {nam_roas:.1f}x)\n")
-    eval_focus = ""
-    if has_rev:
-        eval_focus = "ƯU TIÊN phân tích ROAS (doanh thu/chi tiêu). ROAS<1 = lỗ, ROAS 2-5 = OK, >5 = tốt."
-    elif has_conv:
-        eval_focus = "Phân tích CPA per nhóm SP. CPA cao bất thường (>2x TB) hoặc 0 data → cảnh báo."
+        # Revenue block
+        if R["rev_filled"]:
+            roas = R["rev"]["total"] / c if c > 0 else 0
+            R["roas"] = roas
+            R["rev_str"] = (
+                f"\n\n💵 *Doanh thu*: {fmt_money(R['rev']['total'])}"
+                f"\n   Khách cũ: {fmt_money(R['rev']['khach_cu'])} · Khách mới: {fmt_money(R['rev']['khach_moi'])}"
+                f"\n   ROAS: {roas:.1f}x (chi 1đ → ra {roas:.1f}đ)"
+            )
+        elif R["rev_pending"]:
+            R["roas"] = 0
+            R["rev_str"] = "\n\n💵 *Doanh thu*: ⏳ _NV chưa điền_"
+        else:
+            R["roas"] = 0
+            R["rev_str"] = ""
 
-    eval_raw = call_llm(f"""Bạn là analyst Google Ads cho VDG (B2B bao bì).
+    # Miền nào CÓ số liệu thật để phân tích (đã điền conv hoặc rev)
+    analyzable = {lbl: R for lbl, R in regions.items() if R["conv_filled"] or R["rev_filled"]}
+
+    # --- Gọi LLM CHỈ cho các miền có số liệu. Miền NV chưa điền → KHÔNG đưa vào ---
+    ev = {}
+    if analyzable:
+        ctx_parts = []
+        for lbl, R in analyzable.items():
+            p = f"MIỀN {lbl} (chi {fmt_money(R['cost'])}):\n{R['block']}"
+            if R["conv_filled"]:
+                p += f"\nCPA TB: {fmt_short(R['cpa'])}"
+            if R["rev_filled"]:
+                p += f"\nDoanh thu: {fmt_money(R['rev']['total'])} (ROAS {R['roas']:.1f}x)"
+            elif R["rev_pending"]:
+                p += "\n(Doanh thu: NV CHƯA điền — ĐỪNG nhận xét doanh thu/ROAS cho miền này)"
+            ctx_parts.append(p)
+
+        key_lines = []
+        for lbl in analyzable:
+            pfx = "bac" if lbl == "Bắc" else "nam"
+            key_lines.append(
+                f'  "{pfx}_warn": "<1 dòng cảnh báo {lbl}, có số. OK → \'Không có cảnh báo lớn\'>",\n'
+                f'  "{pfx}_action": "<1 dòng đề xuất {lbl}, động từ Scale/Pause/Tăng/Giảm + tên nhóm + số>",'
+            )
+        focus = ("ƯU TIÊN phân tích ROAS (doanh thu/chi tiêu). ROAS<1 = lỗ, 2-5 = OK, >5 = tốt."
+                 if any(R["rev_filled"] for R in analyzable.values())
+                 else "Phân tích CPA per nhóm SP. CPA cao bất thường (>2x TB) hoặc 0 data → cảnh báo.")
+
+        eval_raw = call_llm(f"""Bạn là analyst Google Ads cho VDG (B2B bao bì).
+CHỈ phân tích các miền có số liệu dưới đây. TUYỆT ĐỐI KHÔNG đề xuất tắt/pause chiến dịch chỉ vì thiếu data — miền thiếu data đã được xử lý riêng.
 
 DATA TUẦN {ngay_bd_str} → {ngay_kt_str}:
-{eval_ctx}
-MIỀN BẮC (chi {fmt_money(bac_cost)}):
-{bac_block}
+{chr(10).join(ctx_parts)}
 
-MIỀN NAM (chi {fmt_money(nam_cost)}):
-{nam_block}
-
-{eval_focus}
+{focus}
 
 Trả về CHỈ JSON:
 {{
-  "bac_warn": "<1 dòng cảnh báo Bắc, max 30 chữ, có số. Nếu OK → 'Không có cảnh báo lớn'>",
-  "bac_action": "<1 dòng đề xuất, có động từ Scale/Pause/Tăng/Giảm + tên nhóm + số>",
-  "nam_warn": "<1 dòng cảnh báo Nam>",
-  "nam_action": "<1 dòng đề xuất Nam>",
-  "summary": "<1-2 câu: so sánh hiệu quả Bắc vs Nam, kèm 1 ưu tiên action>"
+{chr(10).join(key_lines)}
+  "summary": "<1-2 câu nhận xét các miền CÓ số liệu, kèm 1 ưu tiên action>"
 }}
 
 QUY TẮC:
 - Số tiền dạng "20k", "1.5tr"
 - KHÔNG dùng "cần xem xét", "có thể tối ưu" — phải có động từ + số
 """)
-    raw = re.sub(r"^```(?:json)?|```$", "", eval_raw.strip(), flags=re.MULTILINE).strip()
-    try:
-        ev = json.loads(raw)
-    except Exception as e:
-        print(f"⚠️ Parse JSON eval lỗi: {e}")
-        ev = {"bac_warn": "(lỗi parse)", "bac_action": "—",
-              "nam_warn": "(lỗi parse)", "nam_action": "—",
-              "summary": raw[:200]}
+        raw = re.sub(r"^```(?:json)?|```$", "", eval_raw.strip(), flags=re.MULTILINE).strip()
+        try:
+            ev = json.loads(raw)
+        except Exception as e:
+            print(f"⚠️ Parse JSON eval lỗi: {e}")
+            ev = {}
 
-    # Tiêu đề tùy theo loại data có
-    if has_rev and has_conv:
+    # --- Warn/action per miền: NV chưa điền → nhắc sếp; còn lại → lấy từ LLM ---
+    def region_eval(lbl, R):
+        pfx = "bac" if lbl == "Bắc" else "nam"
+        if R["nv_missing"]:
+            return ("🔔 *NV chưa điền số liệu* (data chuyển đổi + doanh thu) tuần này",
+                    f"Sếp nhắc NV phụ trách *{R['name'].title()}* điền Form/Hotline/Zalo/Mess + doanh thu")
+        if not R["spending"]:
+            return ("Không chạy tuần này", "—")
+        warn = ev.get(f"{pfx}_warn", "Không có cảnh báo lớn")
+        action = ev.get(f"{pfx}_action", "—")
+        if R["rev_pending"]:  # đã có conv nhưng NV chưa điền doanh thu
+            action = f"{action} · ⚠️ NV chưa điền doanh thu"
+        return warn, action
+
+    bac, nam = regions["Bắc"], regions["Nam"]
+    bac_warn, bac_action = region_eval("Bắc", bac)
+    nam_warn, nam_action = region_eval("Nam", nam)
+
+    # Banner cảnh báo nếu có miền NV chưa điền
+    pending_labels = [R["name"].title() for R in regions.values() if R["nv_missing"]]
+    banner = ""
+    if pending_labels:
+        banner = (f"🔔 *CẦN SẾP NHẮC NV*: chưa có số liệu cho {', '.join(pending_labels)} "
+                  f"— đề nghị đốc NV phụ trách điền data + doanh thu.\n\n")
+
+    # Tiêu đề
+    has_any_rev = any(R["rev_filled"] for R in regions.values())
+    has_any_conv = any(R["conv_filled"] for R in regions.values())
+    if pending_labels:
+        title = "📊 *Báo cáo tuần* — ⚠️ _có miền NV chưa điền số liệu_"
+    elif has_any_rev and has_any_conv:
         title = "📊 *Báo cáo HIỆU QUẢ ĐẦY ĐỦ* (chi · data · doanh thu)"
-    elif has_rev:
-        title = "📊 *Báo cáo DOANH THU* _(NV chưa cập nhật conversion)_"
-    else:  # has_conv only
+    elif has_any_rev:
+        title = "📊 *Báo cáo DOANH THU* _(chưa có conversion)_"
+    else:
         title = "📊 *Báo cáo CHUYỂN ĐỔI* _(chưa có doanh thu)_"
 
-    # Dòng "Vừa cập nhật" — nếu là follow-up báo cho user biết miền nào vừa điền thêm
+    # Dòng "Vừa cập nhật" — follow-up báo miền nào vừa điền thêm
     new_flags = new_flags or {}
     new_items = []
     if new_flags.get("bac_conv"): new_items.append("Bắc conversion")
@@ -737,29 +788,35 @@ QUY TẮC:
     if new_flags.get("nam_rev"): new_items.append("Nam doanh thu")
     update_line = f"\n✅ _Vừa cập nhật: {', '.join(new_items)}_\n" if new_items else "\n"
 
+    # Summary: nếu có miền chưa điền thì nhắc trước
+    summary = ev.get("summary", "")
+    if pending_labels:
+        rem = f"Cần sếp nhắc NV điền số liệu cho {', '.join(pending_labels)}."
+        summary = f"{rem} {summary}".strip()
+    summary = summary or "—"
+
     return f"""{title} *Tuần {tuan_trong_thang}/Tháng {thang}* ({short_bd} - {short_kt})
-{update_line}
-🌏 *Tổng 2 miền*: {fmt_money(total_spend)}
-   Bắc {fmt_money(bac_cost)} ({bac_pct}%) / Nam {fmt_money(nam_cost)} ({nam_pct}%)
+{update_line}{banner}🌏 *Tổng 2 miền*: {fmt_money(total_spend)}
+   Bắc {fmt_money(bac['cost'])} ({bac_pct}%) / Nam {fmt_money(nam['cost'])} ({nam_pct}%)
 
 ━━━━━━━━━━━━━━
-🅱️ *MIỀN BẮC* — {bac_hdr}
+{bac['icon']} *{bac['name']}* — {bac['hdr']}
 
-{bac_block}{bac_rev_str}
+{bac['block']}{bac['rev_str']}
 
-⚠️ {ev['bac_warn']}
-💡 {ev['bac_action']}
-
-━━━━━━━━━━━━━━
-🅽 *MIỀN NAM* — {nam_hdr}
-
-{nam_block}{nam_rev_str}
-
-⚠️ {ev['nam_warn']}
-💡 {ev['nam_action']}
+⚠️ {bac_warn}
+💡 {bac_action}
 
 ━━━━━━━━━━━━━━
-🔍 {ev['summary']}"""
+{nam['icon']} *{nam['name']}* — {nam['hdr']}
+
+{nam['block']}{nam['rev_str']}
+
+⚠️ {nam_warn}
+💡 {nam_action}
+
+━━━━━━━━━━━━━━
+🔍 {summary}"""
 
 
 # --- Decision tree (state machine) ---
@@ -828,7 +885,7 @@ if need_send:
     if not has_conv and not has_rev:
         msg = build_initial_msg()
     else:
-        msg = build_full_msg(has_conv=has_conv, has_rev=has_rev, new_flags=new_flags)
+        msg = build_full_msg(new_flags=new_flags)
 
     if send_telegram(msg):
         update_kwargs = {"last_check_at": now_str}
