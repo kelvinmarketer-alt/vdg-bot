@@ -1,6 +1,6 @@
 """
 VDG Weekly Report Bot v2
-- Đọc CSV Google Ads → phân loại bằng Claude → ghi vào Google Sheet
+- Đọc CSV Google Ads → phân loại bằng OpenAI → ghi vào Google Sheet
 - Đã fix theo cấu trúc thật: 2 cặp Tháng/Tuần, ngày BĐ/KT ở hàng tổng tuần
 """
 import os
@@ -13,7 +13,7 @@ import pandas as pd
 import gspread
 from datetime import datetime, date, timedelta
 from google.oauth2.service_account import Credentials
-from anthropic import Anthropic
+from openai import OpenAI
 
 # Force UTF-8 output trên Windows
 sys.stdout.reconfigure(encoding="utf-8")
@@ -25,6 +25,7 @@ TAB_NAM = "Báo cáo năm 2026 - miền nam"
 HEADER_ROW = 2
 RAW_TAB = "raw_ads_data"
 GSA_PATH = "gsa.json"
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o")
 
 NHOM_SP = ["Túi 8 cạnh", "Zipper", "Bao bì", "Túi hút chân không", "Giấy"]
 
@@ -203,9 +204,9 @@ for _, r in df.iterrows():
     print(f"  - [{r.campaign}] / {r.ad_group}: {r.cost:,.0f}đ")
 
 
-# === STEP 3: CLAUDE PHÂN LOẠI ===
-print("\n→ Đang gọi Claude phân loại...")
-client = Anthropic()
+# === STEP 3: OPENAI PHÂN LOẠI ===
+print("\n→ Đang gọi OpenAI phân loại...")
+client = OpenAI()
 
 items = "\n".join(
     f'{i}. campaign="{r.campaign}" | ad_group="{r.ad_group}"'
@@ -238,11 +239,11 @@ Data:
 Trả về CHỈ JSON array, KHÔNG markdown, KHÔNG giải thích:
 [{{"campaign":"...","ad_group":"...","mien":"Bắc|Nam","nhom_sp":"..."}}]"""
 
-resp = client.messages.create(
-    model="claude-opus-4-7", max_tokens=2000,
+resp = client.chat.completions.create(
+    model=OPENAI_MODEL, max_tokens=2000,
     messages=[{"role": "user", "content": prompt}],
 )
-raw = resp.content[0].text.strip()
+raw = resp.choices[0].message.content.strip()
 raw = re.sub(r"^```(?:json)?|```$", "", raw, flags=re.MULTILINE).strip()
 mapping = json.loads(raw)
 
@@ -503,13 +504,13 @@ def upsert_state(ws, week_id, **fields):
         ws.append_row([new_data.get(h, "") for h in header])
 
 
-# --- Telegram + Claude helpers ---
-def call_claude(prompt):
-    resp = client.messages.create(
-        model="claude-opus-4-7", max_tokens=2000,
+# --- Telegram + OpenAI helpers ---
+def call_llm(prompt):
+    resp = client.chat.completions.create(
+        model=OPENAI_MODEL, max_tokens=2000,
         messages=[{"role": "user", "content": prompt}],
     )
-    return resp.content[0].text.strip()
+    return resp.choices[0].message.content.strip()
 
 
 def send_telegram(msg):
@@ -610,7 +611,7 @@ def build_full_block(mien_label, conv_dict):
 
 # --- Build messages ---
 def build_initial_msg():
-    """Báo cáo CHỈ chi tiêu — Python build full layout (không dùng Claude)."""
+    """Báo cáo CHỈ chi tiêu — Python build full layout (không dùng LLM)."""
     bac_cost, bac_block = build_cost_block("Bắc")
     nam_cost, nam_block = build_cost_block("Nam")
     return f"""📊 *Báo cáo CHI TIÊU Tuần {tuan_trong_thang}/Tháng {thang}* ({short_bd} - {short_kt})
@@ -672,7 +673,7 @@ def build_full_msg(has_conv, has_rev, new_flags=None):
             f"\n   ROAS: {nam_roas:.1f}x (chi 1đ → ra {nam_roas:.1f}đ)"
         )
 
-    # Eval context cho Claude
+    # Eval context cho LLM
     eval_ctx = ""
     if has_conv:
         eval_ctx += f"CPA TB: Bắc {fmt_short(bac_cpa)} · Nam {fmt_short(nam_cpa)}\n"
@@ -685,7 +686,7 @@ def build_full_msg(has_conv, has_rev, new_flags=None):
     elif has_conv:
         eval_focus = "Phân tích CPA per nhóm SP. CPA cao bất thường (>2x TB) hoặc 0 data → cảnh báo."
 
-    eval_raw = call_claude(f"""Bạn là analyst Google Ads cho VDG (B2B bao bì).
+    eval_raw = call_llm(f"""Bạn là analyst Google Ads cho VDG (B2B bao bì).
 
 DATA TUẦN {ngay_bd_str} → {ngay_kt_str}:
 {eval_ctx}
