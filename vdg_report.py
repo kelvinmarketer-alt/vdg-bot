@@ -27,7 +27,7 @@ RAW_TAB = "raw_ads_data"
 GSA_PATH = "gsa.json"
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o")
 
-NHOM_SP = ["Túi 8 cạnh", "Zipper", "Bao bì", "Túi hút chân không", "Giấy"]
+NHOM_SP = ["Túi 8 cạnh", "Zipper", "Bao bì", "Túi hút chân không", "Giấy", "Màng đơn"]
 
 
 # === HELPERS ===
@@ -218,13 +218,16 @@ NHÓM SP hợp lệ: {NHOM_SP} hoặc "Khác".
 MIỀN: "Bắc" hoặc "Nam" (đọc từ campaign name).
 
 QUY TẮC PHÂN LOẠI NHÓM SP (theo thứ tự ưu tiên):
-1. Nếu campaign chứa keyword nhóm SP rõ ràng → dùng campaign name
-   (vd "VDG - miền bắc bao bì" → Bao bì)
-2. Nếu ad_group là "(campaign-level)" hoặc "(performance-max)" → dùng campaign name
+SẢN PHẨM = NHÓM QUẢNG CÁO (ad_group) — đây là nguồn xác định nhóm SP CHÍNH.
+1. Nếu ad_group có keyword nhóm SP rõ ràng → LUÔN dùng AD_GROUP name (ưu tiên cao nhất)
+   (vd campaign "VDG - miền bắc bao bì" nhưng ad_group "màng đơn" → Màng đơn, KHÔNG phải Bao bì)
+2. Nếu ad_group là "(campaign-level)" / "(performance-max)" / không chứa keyword sản phẩm nào
+   → mới fallback dùng campaign name
    (vd "Performance Max-5- Miền nam" → Bao bì miền nam, theo policy của user)
-3. Còn lại → đọc ad_group name để xác định nhóm SP
+3. Còn lại không xác định được → "Khác"
 
 KEYWORD → NHÓM:
+- "màng đơn" / "mang don" → Màng đơn
 - "bao bì" → Bao bì
 - "zipper" → Zipper
 - "8 cạnh" / "tám cạnh" → Túi 8 cạnh
