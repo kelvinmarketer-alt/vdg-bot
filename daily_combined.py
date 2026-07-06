@@ -51,6 +51,16 @@ def gg_product(ad_group, campaign):
     return "Bao bì"
 
 
+def gg_mien(campaign):
+    """Miền (Bắc/Nam) đọc từ TÊN CHIẾN DỊCH GG."""
+    c = (campaign or "").lower()
+    if "bắc" in c or "bac" in c:
+        return "Bắc"
+    if "nam" in c:
+        return "Nam"
+    return "Khác"
+
+
 def send_telegram(msg):
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
@@ -102,12 +112,12 @@ def main():
             e[0] += digits(row[2])
             e[1] += digits(row[3])
 
-    # GG: tab raw_daily — A=date(iso) B=campaign C=ad_group D=cost
-    gg = {}
+    # GG: tab raw_daily — A=date(iso) B=campaign C=ad_group D=cost; tách theo MIỀN (từ campaign)
+    gg = {}  # (mien, product) -> spend
     for row in sh.worksheet(GG_TAB).get_all_values()[1:]:
         if len(row) >= 4 and row[0].strip() == iso:
-            p = gg_product(row[2], row[1])
-            gg[p] = gg.get(p, 0) + digits(row[3])
+            key = (gg_mien(row[1]), gg_product(row[2], row[1]))
+            gg[key] = gg.get(key, 0) + digits(row[3])
 
     fb_total = sum(v[0] for v in fb.values())
     gg_total = sum(gg.values())
@@ -122,8 +132,14 @@ def main():
         lines.append("  _(không có dữ liệu)_")
     lines += ["", f"🟢 *GOOGLE* — {fmt(gg_total)}"]
     if gg:
-        for p, sp in sorted(gg.items(), key=lambda kv: -kv[1]):
-            lines.append(f"  📦 {p}: {fmt(sp)}")
+        icons = {"Bắc": "🅱️", "Nam": "🅽", "Khác": "▪️"}
+        for mien in ["Bắc", "Nam", "Khác"]:
+            items = {p: sp for (m, p), sp in gg.items() if m == mien}
+            if not items:
+                continue
+            lines.append(f"{icons.get(mien, '')} *Miền {mien}* — {fmt(sum(items.values()))}")
+            for p, sp in sorted(items.items(), key=lambda kv: -kv[1]):
+                lines.append(f"   📦 {p}: {fmt(sp)}")
     else:
         lines.append("  _(không có dữ liệu)_")
     lines += ["", "━━━━━━━━━━", f"🌏 *TỔNG GG + FB: {fmt(combined)}*"]
