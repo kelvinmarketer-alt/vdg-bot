@@ -113,8 +113,12 @@ def graph_insights(acct, token, since_str, until_str):
     rows, page = [], 0
     while url:
         page += 1
-        with urllib.request.urlopen(url, timeout=60) as r:
-            data = json.loads(r.read().decode("utf-8"))
+        try:
+            with urllib.request.urlopen(url, timeout=60) as r:
+                data = json.loads(r.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            print(f"❌ Graph API lỗi HTTP {e.code}: {e.read().decode('utf-8', 'ignore')}")
+            raise
         rows.extend(data.get("data", []))
         url = data.get("paging", {}).get("next")
         if page > 20:
