@@ -8,6 +8,7 @@ VDG Daily Combined Report (GG + FB) → Telegram
 """
 import os
 import sys
+import time
 import re
 import json
 import urllib.request
@@ -34,6 +35,18 @@ def digits(s):
 
 def fmt(n):
     return f"{int(n):,}đ".replace(",", ".")
+
+
+def with_retry(fn, tries=4):
+    """Thử lại khi Google API lỗi tạm thời (503/500/429) — tránh fail vô cớ."""
+    for i in range(tries):
+        try:
+            return fn()
+        except Exception as e:
+            if i == tries - 1:
+                raise
+            print(f"⚠️ Google API lỗi tạm ({e}); thử lại {i + 2}/{tries} sau {3 * (i + 1)}s...")
+            time.sleep(3 * (i + 1))
 
 
 def dmy(iso_str):
@@ -147,7 +160,7 @@ def fb_pull_and_write(sh):
     agg = {k: v for k, v in agg.items() if v[0] > 0 or v[1] > 0}
 
     ws = sh.worksheet(FB_TAB)
-    existing = ws.get_all_values()
+    existing = with_retry(lambda: ws.get_all_values())
     idx, last = {}, 1
     for i, row in enumerate(existing[1:], start=2):
         if row and row[0].strip():
@@ -164,14 +177,14 @@ def fb_pull_and_write(sh):
         updates.append({"range": f"A{r_}:G{r_}",
                         "values": [[d, p, sp, ms, cost, f"=SUMIF(A:A;A{r_};C:C)", week_of.get(d, "")]]})
     if updates:
-        ws.batch_update(updates, value_input_option="USER_ENTERED")
+        with_retry(lambda: ws.batch_update(updates, value_input_option="USER_ENTERED"))
     print(f"✓ FB: kéo Meta + ghi {len(updates)} dòng vào FB 2026")
     return agg
 
 
 def fb_from_sheet(sh, dm):
     fb = {}
-    for row in sh.worksheet(FB_TAB).get_all_values()[1:]:
+    for row in with_retry(lambda: sh.worksheet(FB_TAB).get_all_values())[1:]:
         if len(row) >= 4 and row[0].strip() == dm:
             p = row[1].strip()
             if not p:
@@ -249,7 +262,7 @@ def main():
     creds = Credentials.from_service_account_file(
         GSA_PATH, scopes=["https://www.googleapis.com/auth/spreadsheets"])
     gc = gspread.authorize(creds)
-    sh = gc.open_by_key(SHEET_ID)
+    sh = with_retry(lambda: gc.open_by_key(SHEET_ID))
 
     # FB — ưu tiên kéo Meta + ghi sheet; không có token thì đọc sheet
     agg = fb_pull_and_write(sh)
@@ -261,7 +274,7 @@ def main():
 
     # GG — raw_daily hôm qua, tách miền
     gg = {}
-    for row in sh.worksheet(GG_TAB).get_all_values()[1:]:
+    for row in with_retry(lambda: sh.worksheet(GG_TAB).get_all_values())[1:]:
         if len(row) >= 4 and row[0].strip() == iso:
             key = (gg_mien(row[1]), gg_product(row[2], row[1]))
             gg[key] = gg.get(key, 0) + digits(row[3])
