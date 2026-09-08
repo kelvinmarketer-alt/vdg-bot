@@ -92,7 +92,8 @@ def main():
 
     raw = urllib.request.urlopen(CSV_URL, timeout=30).read().decode("utf-8")
     rows = list(csv.reader(io.StringIO(raw)))
-    body = [r for r in rows[1:] if len(r) > 10 and r[1].strip()]
+    # pad mỗi dòng >=12 cột để không rớt dòng có ô cuối trống; lọc dòng CÓ NGÀY hợp lệ
+    body = [r + [""] * (12 - len(r)) for r in rows[1:] if len(r) >= 2 and parse_dmy(r[1])]
     day = [r for r in body if parse_dmy(r[1]) == ykey]
 
     header = f"📋 *BÁO CÁO CHĂM SÓC KH — Ngày {dstr}* _(hôm qua)_"
