@@ -1,0 +1,24 @@
+name: VDG Care Report
+
+on:
+  schedule:
+    - cron: "0 1 * * *"   # 08:00 sáng VN (01:00 UTC) — báo cáo chăm sóc KH hôm qua
+  workflow_dispatch:
+    inputs:
+      target_date:
+        description: "YYYY-MM-DD (test 1 ngày cụ thể; trống = hôm qua)"
+        required: false
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run care report
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TARGET_DATE: ${{ github.event.inputs.target_date }}
+        run: python care_report.py
