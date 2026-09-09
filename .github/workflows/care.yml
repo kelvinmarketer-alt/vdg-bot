@@ -2,7 +2,7 @@ name: VDG Care Report
 
 on:
   schedule:
-    - cron: "0 1 * * *"   # 08:00 sáng VN (01:00 UTC) — báo cáo chăm sóc KH hôm qua
+    - cron: "30 2 * * *"   # 09:30 sáng VN (02:30 UTC) — báo cáo chăm sóc KH hôm qua
   workflow_dispatch:
     inputs:
       target_date:
