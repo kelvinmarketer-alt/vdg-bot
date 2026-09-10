@@ -56,6 +56,28 @@ def kh_cat(nguon):
     return "Khác"
 
 
+def marker_file(y):
+    """Đường dẫn dấu 'đã gửi' theo ngày báo cáo (dùng chống gửi trùng khi
+    chạy nhiều nhịp cron trong ngày). Chỉ bật khi có env STATE_DIR."""
+    d = os.environ.get("STATE_DIR", "").strip()
+    if not d:
+        return None
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, f"sent_{y.year}-{y.month:02d}-{y.day:02d}.txt")
+
+
+def already_sent(y):
+    p = marker_file(y)
+    return bool(p) and os.path.exists(p)
+
+
+def mark_sent(y):
+    p = marker_file(y)
+    if p:
+        with open(p, "w") as f:
+            f.write(datetime.now(VN_TZ).isoformat())
+
+
 def send_telegram(msg):
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     if not token:
@@ -90,6 +112,10 @@ def main():
     dstr = f"{y.day}/{y.month}"
     print(f"→ Báo cáo chăm sóc ngày {dstr}/{y.year}")
 
+    if already_sent(y):
+        print("→ Đã gửi hôm nay rồi (nhịp cron trước) — bỏ qua để khỏi trùng.")
+        return
+
     raw = urllib.request.urlopen(CSV_URL, timeout=30).read().decode("utf-8")
     rows = list(csv.reader(io.StringIO(raw)))
     # pad mỗi dòng >=12 cột để không rớt dòng có ô cuối trống; lọc dòng CÓ NGÀY hợp lệ
@@ -99,7 +125,8 @@ def main():
     header = f"📋 *BÁO CÁO CHĂM SÓC KH — Ngày {dstr}* _(hôm qua)_"
 
     if not day:
-        send_telegram(header + "\n\n⚠️ *Chưa có dữ liệu* — nhân viên chưa cập nhật sheet cho ngày này.")
+        if send_telegram(header + "\n\n⚠️ *Chưa có dữ liệu* — nhân viên chưa cập nhật sheet cho ngày này."):
+            mark_sent(y)
         print("→ Không có dữ liệu, đã báo.")
         return
 
@@ -140,7 +167,8 @@ def main():
     for k, v in staff.most_common():
         L.append(f"   • {k}: {v}")
 
-    send_telegram("\n".join(L))
+    if send_telegram("\n".join(L)):
+        mark_sent(y)
     print("✓ Done!")
 
 
