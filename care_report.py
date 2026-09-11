@@ -143,49 +143,66 @@ def eval_meaningful(rows):
     return False
 
 
-def eval_section(rows, dstr):
-    """Dựng phần đánh giá hiệu quả NV cho ngày; None nếu không có dòng nào."""
+def _ratio(a, t):
+    """'a/t (p%)' — bỏ % khi target=0."""
+    return f"{a}/{t}" + (f" ({a / t * 100:.0f}%)" if t else "")
+
+
+def eval_section(rows, dstr, tt_by_nv=None, cu_by_nv=None):
+    """Đánh giá + XẾP HẠNG NV theo ngày; None nếu không có dòng nào.
+    tt_by_nv / cu_by_nv = số lượt THỰC TẾ theo NV (đếm từ tab chăm sóc):
+    tự tìm (TT) và KH cũ. Mục tiêu KPI lấy từ tab đánh giá (cột 9/10)."""
     if not rows:
         return None
+    tt_by_nv = tt_by_nv or {}
+    cu_by_nv = cu_by_nv or {}
     items = []
     for r in rows:
         name = r[1].strip()
-        target = digits(r[2])
-        actual = digits(r[7])
+        target = digits(r[2])          # DS mục tiêu
+        actual = digits(r[7])          # DS thực tế
         off = "nghỉ" in r[12].strip().lower()
         p = (actual / target * 100) if target else 0
-        items.append((name, target, actual, p, off, r))
-    # đi làm xếp theo %DS giảm dần; người nghỉ xuống cuối
-    items.sort(key=lambda x: (x[4], -x[3]))
-    L = [f"📊 *ĐÁNH GIÁ HIỆU QUẢ NV — Ngày {dstr}*", ""]
-    tot_t = tot_a = 0
-    for name, target, actual, p, off, r in items:
-        if off:
-            L.append(f"😴 *{name}*: Nghỉ")
-            continue
-        tot_t += target
-        tot_a += actual
-        em = "🟢" if p >= 100 else "🟡" if p >= 50 else "🟠" if p > 0 else "🔴"
-        L.append(f"{em} *{name}*: {fmt(actual)} / {fmt(target)} ({p:.0f}%)")
+        cu_tgt, tt_tgt = digits(r[9]), digits(r[10])   # mục tiêu KH cũ / tự tìm
+        cu_act, tt_act = cu_by_nv.get(name, 0), tt_by_nv.get(name, 0)
+        items.append(dict(name=name, target=target, actual=actual, p=p, off=off,
+                          r=r, cu_tgt=cu_tgt, tt_tgt=tt_tgt,
+                          cu_act=cu_act, tt_act=tt_act))
+    # đi làm xếp theo %DS giảm dần → xếp hạng; người nghỉ xuống cuối
+    work = sorted([it for it in items if not it["off"]], key=lambda x: -x["p"])
+    offs = [it for it in items if it["off"]]
+
+    L = [f"📊 *ĐÁNH GIÁ & XẾP HẠNG NV — Ngày {dstr}*",
+         "_(xếp theo % hoàn thành KPI doanh số)_", ""]
+    medals = ["🥇", "🥈", "🥉"]
+    tot_t = tot_a = tot_cu_t = tot_cu_a = tot_tt_t = tot_tt_a = 0
+    for i, it in enumerate(work):
+        rank = medals[i] if i < 3 else f"*{i + 1}.*"
+        tot_t += it["target"]; tot_a += it["actual"]
+        tot_cu_t += it["cu_tgt"]; tot_cu_a += it["cu_act"]
+        tot_tt_t += it["tt_tgt"]; tot_tt_a += it["tt_act"]
+        em = ("🟢" if it["p"] >= 100 else "🟡" if it["p"] >= 50
+              else "🟠" if it["p"] > 0 else "🔴")
+        L.append(f"{rank} *{it['name']}* — {em} KPI DS {it['p']:.0f}%")
         srcs = []
         for lbl, ci in [("QC mới", 3), ("QC cũ", 4), ("Tự tìm mới", 5), ("Tự tìm cũ", 6)]:
-            v = digits(r[ci])
+            v = digits(it["r"][ci])
             if v:
                 srcs.append(f"{lbl} {fmt(v)}")
+        dsline = f"   💰 DS: {fmt(it['actual'])} / {fmt(it['target'])}"
         if srcs:
-            L.append("   • Nguồn: " + " · ".join(srcs))
-        cs = []
-        if r[9].strip():
-            cs.append(f"KH cũ {r[9].strip()}")
-        if r[10].strip():
-            cs.append(f"tự tìm {r[10].strip()}")
-        if r[11].strip():
-            cs.append(f"gặp {r[11].strip()}")
-        if cs:
-            L.append("   • Mục tiêu CS: " + " · ".join(cs))
+            dsline += "  (" + " · ".join(srcs) + ")"
+        L.append(dsline)
+        L.append(f"   📞 Tự tìm: {_ratio(it['tt_act'], it['tt_tgt'])}"
+                 f"  ·  🔁 KH cũ: {_ratio(it['cu_act'], it['cu_tgt'])}")
+    for it in offs:
+        L.append(f"😴 *{it['name']}*: Nghỉ")
     if tot_t:
         pt = tot_a / tot_t * 100
-        L += ["", f"Σ *Tổng đội: {fmt(tot_a)} / {fmt(tot_t)}* ({pt:.0f}%)"]
+        L += ["", f"Σ *Tổng đội:*",
+              f"   💰 DS: {fmt(tot_a)} / {fmt(tot_t)} ({pt:.0f}%)",
+              f"   📞 Tự tìm: {_ratio(tot_tt_a, tot_tt_t)}"
+              f"  ·  🔁 KH cũ: {_ratio(tot_cu_a, tot_cu_t)}"]
     return "\n".join(L)
 
 
@@ -207,8 +224,19 @@ def main():
     body = [r + [""] * (11 - len(r)) for r in rows[1:] if len(r) >= 1 and parse_dmy(r[0])]
     day = [r for r in body if parse_dmy(r[0]) == ykey]
 
+    # đếm số lượt THỰC TẾ theo NV cho KPI: tự tìm (TT) và KH cũ (cột Nguồn)
+    tt_by_nv, cu_by_nv = defaultdict(int), defaultdict(int)
+    for r in day:
+        nv = r[2].strip()
+        c = kh_cat(r[1])
+        if c in ("TT mới", "TT cũ"):
+            tt_by_nv[nv] += 1
+        if c in ("QC cũ", "TT cũ"):
+            cu_by_nv[nv] += 1
+
     ev_rows = fetch_eval(ykey)
-    ev = eval_section(ev_rows, dstr) if eval_meaningful(ev_rows) else None
+    ev = (eval_section(ev_rows, dstr, tt_by_nv, cu_by_nv)
+          if eval_meaningful(ev_rows) else None)
 
     header = f"📋 *BÁO CÁO CHĂM SÓC KH — Ngày {dstr}* _(hôm qua)_"
 
