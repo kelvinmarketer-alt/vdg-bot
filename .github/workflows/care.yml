@@ -40,4 +40,6 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TARGET_DATE: ${{ github.event.inputs.target_date }}
           STATE_DIR: .state
+          # chạy tay (manual) thì luôn gửi, bỏ qua chống-trùng để re-send bản sửa
+          FORCE: ${{ github.event_name == 'workflow_dispatch' && '1' || '' }}
         run: python care_report.py

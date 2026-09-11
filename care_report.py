@@ -25,8 +25,9 @@ EVAL_CSV_URL = (f"https://docs.google.com/spreadsheets/d/{SHEET_ID}"
                 f"/gviz/tq?tqx=out:csv&sheet={urllib.parse.quote(EVAL_SHEET)}")
 CHAT_ID = "-5311055700"  # group báo cáo chăm sóc KH (bot VĐG)
 VN_TZ = timezone(timedelta(hours=7))
-# Cột: 0 STT · 1 Ngày · 2 Nguồn · 3 NV · 4 Cách tư vấn · 5 TT KH · 6 TT SP
-#      · 7 Nhóm SP · 8 Quá trình · 9 Mức độ KH · 10 Doanh số · 11 Ghi chú
+# Cột tab "Báo cáo chi tiết" (đã BỎ cột STT): 0 Ngày · 1 Nguồn · 2 NV
+#   · 3 Định hướng tư vấn · 4 TT KH · 5 TT SP · 6 Nhóm SP · 7 Quá trình
+#   · 8 Mức độ KH · 9 Doanh số · 10 Ghi chú
 ORDER = ["QC mới", "QC cũ", "TT mới", "TT cũ", "Khác"]
 
 
@@ -196,15 +197,15 @@ def main():
     dstr = f"{y.day}/{y.month}"
     print(f"→ Báo cáo chăm sóc ngày {dstr}/{y.year}")
 
-    if already_sent(y):
+    if already_sent(y) and not os.environ.get("FORCE", "").strip():
         print("→ Đã gửi hôm nay rồi (nhịp cron trước) — bỏ qua để khỏi trùng.")
         return
 
     raw = urllib.request.urlopen(CSV_URL, timeout=30).read().decode("utf-8")
     rows = list(csv.reader(io.StringIO(raw)))
-    # pad mỗi dòng >=12 cột để không rớt dòng có ô cuối trống; lọc dòng CÓ NGÀY hợp lệ
-    body = [r + [""] * (12 - len(r)) for r in rows[1:] if len(r) >= 2 and parse_dmy(r[1])]
-    day = [r for r in body if parse_dmy(r[1]) == ykey]
+    # pad mỗi dòng >=11 cột để không rớt dòng có ô cuối trống; lọc dòng CÓ NGÀY hợp lệ (cột 0)
+    body = [r + [""] * (11 - len(r)) for r in rows[1:] if len(r) >= 1 and parse_dmy(r[0])]
+    day = [r for r in body if parse_dmy(r[0]) == ykey]
 
     ev_rows = fetch_eval(ykey)
     ev = eval_section(ev_rows, dstr) if eval_meaningful(ev_rows) else None
@@ -232,15 +233,15 @@ def main():
     staff = Counter()
     muc = Counter()
     for r in day:
-        c = kh_cat(r[2])
+        c = kh_cat(r[1])
         cat[c] += 1
-        rev[c] += digits(r[10]) if len(r) > 10 else 0
-        if len(r) > 7 and r[7].strip():
-            prod[r[7].strip()] += 1
-        if len(r) > 3 and r[3].strip():
-            staff[r[3].strip()] += 1
-        if len(r) > 9 and r[9].strip():
-            muc[r[9].strip()] += 1
+        rev[c] += digits(r[9])
+        if r[6].strip():
+            prod[r[6].strip()] += 1
+        if r[2].strip():
+            staff[r[2].strip()] += 1
+        if r[8].strip():
+            muc[r[8].strip()] += 1
     tong_rev = sum(rev.values())
 
     L = [header, "", f"👥 *Data chăm sóc: {len(day)} lượt*"]
