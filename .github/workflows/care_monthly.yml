@@ -1,16 +1,15 @@
-name: VDG Care Report
+name: VDG Care Monthly
 
 on:
   schedule:
-    # 3 nhịp dự phòng sáng VN (9:30 / 10:30 / 12:30) — GitHub hay trễ/bỏ nhịp;
-    # có cache chống gửi trùng nên nhịp nào chạy trước thì gửi, nhịp sau tự bỏ qua.
-    - cron: "30 2 * * *"   # 09:30 VN (02:30 UTC)
-    - cron: "30 3 * * *"   # 10:30 VN (03:30 UTC)
-    - cron: "30 5 * * *"   # 12:30 VN (05:30 UTC)
+    # sáng NGÀY 1 hằng tháng (9:30 / 10:30 / 12:30 VN) — tổng kết THÁNG trước
+    - cron: "30 2 1 * *"
+    - cron: "30 3 1 * *"
+    - cron: "30 5 1 * *"
   workflow_dispatch:
     inputs:
       target_date:
-        description: "YYYY-MM-DD (test 1 ngày cụ thể; trống = hôm qua)"
+        description: "YYYY-MM-DD mốc (trống = hôm nay; báo cáo THÁNG TRƯỚC mốc đó)"
         required: false
 
 jobs:
@@ -21,25 +20,24 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Khóa cache chống trùng theo ngày
+      - name: Khóa cache chống trùng theo tháng
         id: key
         env:
-          MODE: daily
+          MODE: monthly
           TARGET_DATE: ${{ github.event.inputs.target_date }}
         run: |
           K=$(python -c "import care_report; print(care_report.resolve_period()[4])")
           echo "key=$K" >> "$GITHUB_OUTPUT"
-      - name: Khôi phục dấu 'đã gửi' của ngày
+      - name: Khôi phục dấu 'đã gửi' của tháng
         uses: actions/cache@v4
         with:
           path: .state
           key: ${{ steps.key.outputs.key }}
-      - name: Run care report
+      - name: Run monthly report
         env:
-          MODE: daily
+          MODE: monthly
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TARGET_DATE: ${{ github.event.inputs.target_date }}
           STATE_DIR: .state
-          # chạy tay (manual) thì luôn gửi, bỏ qua chống-trùng để re-send bản sửa
           FORCE: ${{ github.event_name == 'workflow_dispatch' && '1' || '' }}
         run: python care_report.py
