@@ -85,11 +85,21 @@ def resolve_period():
         end = last_prev
         title = f"🗓️ *BÁO CÁO THÁNG {start.month}/{start.year}* _(tháng vừa qua)_"
         return mode, start, end, title, f"month-{start.year}-{start.month:02d}", "cả tháng"
-    # daily: TARGET_DATE = đúng ngày cần báo; trống = hôm qua
-    d = (datetime.strptime(tgt, "%Y-%m-%d").date() if tgt
-         else datetime.now(VN_TZ).date() - timedelta(days=1))
-    title = f"📋 *BÁO CÁO CHĂM SÓC KH — Ngày {d.day}/{d.month}* _(hôm qua)_"
-    return mode, d, d, title, f"day-{d.isoformat()}", "hôm qua"
+    # daily: TARGET_DATE = đúng ngày cần báo (không né); trống = hôm qua.
+    # Công ty NGHỈ CHỦ NHẬT + NV nhập liệu thứ 7 vào thứ 2 → nếu 'hôm qua' rơi
+    # vào Chủ nhật thì lùi về THỨ 7 (sáng thứ 2 báo cáo ngày cho thứ 7).
+    if tgt:
+        d = datetime.strptime(tgt, "%Y-%m-%d").date()
+        sub, note = "_(hôm qua)_", "hôm qua"
+    else:
+        d = datetime.now(VN_TZ).date() - timedelta(days=1)
+        if d.weekday() == 6:            # Chủ nhật (nghỉ)
+            d -= timedelta(days=1)      # → Thứ 7
+            sub, note = "_(thứ 7 tuần rồi)_", "ngày này"
+        else:
+            sub, note = "_(hôm qua)_", "hôm qua"
+    title = f"📋 *BÁO CÁO CHĂM SÓC KH — Ngày {d.day}/{d.month}* {sub}"
+    return mode, d, d, title, f"day-{d.isoformat()}", note
 
 
 def kh_cat(nguon):
