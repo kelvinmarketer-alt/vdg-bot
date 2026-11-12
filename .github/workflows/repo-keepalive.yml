@@ -1,0 +1,26 @@
+name: keepalive
+# Giữ repo luôn "có hoạt động" để GitHub KHÔNG tự tắt cron (luật disabled_inactivity 60 ngày).
+# Tự tạo commit rỗng 2 lần/tháng (ngày 1 & 15). Không đụng code, không trigger workflow khác.
+on:
+  schedule:
+    - cron: "17 2 1,15 * *"   # 02:17 UTC ngày 1 & 15 hằng tháng
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: keepalive
+  cancel-in-progress: false
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Empty commit giữ repo active
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit --allow-empty -m "chore(keepalive): giữ cron sống $(date -u +%F)"
+          git push
